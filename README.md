@@ -13,11 +13,19 @@ CloakBrowserMCP exposes [CloakBrowser](https://github.com/CloakHQ/CloakBrowser)'
 
 ## Install
 
+**One-line setup** (clones, installs, downloads the stealth binary, runs tests):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/overtimepog/CloakMCP/main/setup.sh | bash
+```
+
+**pip install:**
+
 ```bash
 pip install cloakbrowsermcp
 ```
 
-Or from source:
+**From source:**
 
 ```bash
 git clone https://github.com/overtimepog/CloakMCP.git
