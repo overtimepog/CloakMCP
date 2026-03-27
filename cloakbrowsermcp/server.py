@@ -61,6 +61,25 @@ logger = logging.getLogger("cloakbrowsermcp")
 _session = BrowserSession()
 
 
+def _error(message: str) -> str:
+    """Return a JSON error string for tool responses."""
+    return json.dumps({"error": message})
+
+
+async def _safe_call(handler, *args, **kwargs) -> str:
+    """Call a tool handler with error handling, returning JSON."""
+    try:
+        result = await handler(*args, **kwargs)
+        return json.dumps(result)
+    except KeyError as e:
+        return _error(f"Page not found: {e}")
+    except RuntimeError as e:
+        return _error(str(e))
+    except Exception as e:
+        logger.exception("Tool error in %s", handler.__name__)
+        return _error(f"{type(e).__name__}: {e}")
+
+
 def create_server() -> FastMCP:
     """Create and configure the CloakBrowserMCP server with all tools registered."""
 
@@ -134,14 +153,12 @@ def create_server() -> FastMCP:
             "user_agent": user_agent,
             "extra_args": extra_args or [],
         }
-        result = await handle_launch_browser(_session, params)
-        return json.dumps(result)
+        return await _safe_call(handle_launch_browser, _session, params)
 
     @mcp.tool()
     async def close_browser() -> str:
         """Close the stealth browser and all open pages."""
-        result = await handle_close_browser(_session, {})
-        return json.dumps(result)
+        return await _safe_call(handle_close_browser, _session, {})
 
     # -----------------------------------------------------------------------
     # Page management
@@ -154,8 +171,7 @@ def create_server() -> FastMCP:
         Args:
             url: URL to navigate to after creating the page.
         """
-        result = await handle_new_page(_session, {"url": url} if url else {})
-        return json.dumps(result)
+        return await _safe_call(handle_new_page, _session, {"url": url} if url else {})
 
     @mcp.tool()
     async def close_page(page_id: str) -> str:
@@ -164,14 +180,12 @@ def create_server() -> FastMCP:
         Args:
             page_id: The page ID returned by launch_browser or new_page.
         """
-        result = await handle_close_page(_session, {"page_id": page_id})
-        return json.dumps(result)
+        return await _safe_call(handle_close_page, _session, {"page_id": page_id})
 
     @mcp.tool()
     async def list_pages() -> str:
         """List all open browser pages with their IDs and URLs."""
-        result = await handle_list_pages(_session, {})
-        return json.dumps(result)
+        return await _safe_call(handle_list_pages, _session, {})
 
     # -----------------------------------------------------------------------
     # Navigation
@@ -192,13 +206,12 @@ def create_server() -> FastMCP:
             wait_until: When to consider navigation done — 'domcontentloaded', 'load', 'networkidle'.
             timeout: Navigation timeout in milliseconds.
         """
-        result = await handle_navigate(_session, {
+        return await _safe_call(handle_navigate, _session, {
             "page_id": page_id,
             "url": url,
             "wait_until": wait_until,
             "timeout": timeout,
         })
-        return json.dumps(result)
 
     # -----------------------------------------------------------------------
     # Interaction
@@ -217,12 +230,11 @@ def create_server() -> FastMCP:
             selector: CSS selector of the element to click.
             timeout: Max time to wait for the element in ms.
         """
-        result = await handle_click(_session, {
+        return await _safe_call(handle_click, _session, {
             "page_id": page_id,
             "selector": selector,
             "timeout": timeout,
         })
-        return json.dumps(result)
 
     @mcp.tool()
     async def type_text(
@@ -239,13 +251,12 @@ def create_server() -> FastMCP:
             text: Text to type.
             delay: Delay between keystrokes in ms (0 for instant, 50-100 for realistic).
         """
-        result = await handle_type_text(_session, {
+        return await _safe_call(handle_type_text, _session, {
             "page_id": page_id,
             "selector": selector,
             "text": text,
             "delay": delay,
         })
-        return json.dumps(result)
 
     @mcp.tool()
     async def fill_form(
@@ -262,12 +273,11 @@ def create_server() -> FastMCP:
             selector: CSS selector of the input element.
             value: Value to fill.
         """
-        result = await handle_fill_form(_session, {
+        return await _safe_call(handle_fill_form, _session, {
             "page_id": page_id,
             "selector": selector,
             "value": value,
         })
-        return json.dumps(result)
 
     @mcp.tool()
     async def hover(page_id: str, selector: str) -> str:
@@ -277,11 +287,10 @@ def create_server() -> FastMCP:
             page_id: Target page ID.
             selector: CSS selector of the element to hover.
         """
-        result = await handle_hover(_session, {
+        return await _safe_call(handle_hover, _session, {
             "page_id": page_id,
             "selector": selector,
         })
-        return json.dumps(result)
 
     @mcp.tool()
     async def select_option(
@@ -308,8 +317,7 @@ def create_server() -> FastMCP:
         if index is not None:
             params["index"] = index
 
-        result = await handle_select_option(_session, params)
-        return json.dumps(result)
+        return await _safe_call(handle_select_option, _session, params)
 
     @mcp.tool()
     async def press_key(
@@ -328,8 +336,7 @@ def create_server() -> FastMCP:
         if selector:
             params["selector"] = selector
 
-        result = await handle_press_key(_session, params)
-        return json.dumps(result)
+        return await _safe_call(handle_press_key, _session, params)
 
     @mcp.tool()
     async def scroll(
@@ -344,12 +351,11 @@ def create_server() -> FastMCP:
             direction: 'up' or 'down'.
             amount: Pixels to scroll.
         """
-        result = await handle_scroll(_session, {
+        return await _safe_call(handle_scroll, _session, {
             "page_id": page_id,
             "direction": direction,
             "amount": amount,
         })
-        return json.dumps(result)
 
     # -----------------------------------------------------------------------
     # Content extraction
@@ -368,12 +374,11 @@ def create_server() -> FastMCP:
             full_page: Capture the entire scrollable page.
             selector: CSS selector to screenshot a specific element.
         """
-        result = await handle_screenshot(_session, {
+        return await _safe_call(handle_screenshot, _session, {
             "page_id": page_id,
             "full_page": full_page,
             "selector": selector,
         })
-        return json.dumps(result)
 
     @mcp.tool()
     async def get_content(
@@ -388,12 +393,11 @@ def create_server() -> FastMCP:
             selector: CSS selector to extract content from. None = full page.
             content_type: 'html' (full page or inner HTML), 'text' (visible text), 'outer_html'.
         """
-        result = await handle_get_content(_session, {
+        return await _safe_call(handle_get_content, _session, {
             "page_id": page_id,
             "selector": selector,
             "content_type": content_type,
         })
-        return json.dumps(result)
 
     @mcp.tool()
     async def evaluate(page_id: str, expression: str) -> str:
@@ -403,11 +407,10 @@ def create_server() -> FastMCP:
             page_id: Target page ID.
             expression: JavaScript expression to evaluate.
         """
-        result = await handle_evaluate(_session, {
+        return await _safe_call(handle_evaluate, _session, {
             "page_id": page_id,
             "expression": expression,
         })
-        return json.dumps(result)
 
     @mcp.tool()
     async def wait_for_selector(
@@ -424,13 +427,12 @@ def create_server() -> FastMCP:
             state: Target state — 'visible', 'hidden', 'attached', 'detached'.
             timeout: Max wait time in milliseconds.
         """
-        result = await handle_wait_for_selector(_session, {
+        return await _safe_call(handle_wait_for_selector, _session, {
             "page_id": page_id,
             "selector": selector,
             "state": state,
             "timeout": timeout,
         })
-        return json.dumps(result)
 
     # -----------------------------------------------------------------------
     # Cookies
@@ -443,8 +445,7 @@ def create_server() -> FastMCP:
         Args:
             page_id: Target page ID.
         """
-        result = await handle_get_cookies(_session, {"page_id": page_id})
-        return json.dumps(result)
+        return await _safe_call(handle_get_cookies, _session, {"page_id": page_id})
 
     @mcp.tool()
     async def set_cookies(page_id: str, cookies: list[dict]) -> str:
@@ -454,11 +455,10 @@ def create_server() -> FastMCP:
             page_id: Target page ID.
             cookies: List of cookie dicts with name, value, domain, path fields.
         """
-        result = await handle_set_cookies(_session, {
+        return await _safe_call(handle_set_cookies, _session, {
             "page_id": page_id,
             "cookies": cookies,
         })
-        return json.dumps(result)
 
     # -----------------------------------------------------------------------
     # Page info & export
@@ -471,8 +471,7 @@ def create_server() -> FastMCP:
         Args:
             page_id: Target page ID.
         """
-        result = await handle_get_page_info(_session, {"page_id": page_id})
-        return json.dumps(result)
+        return await _safe_call(handle_get_page_info, _session, {"page_id": page_id})
 
     @mcp.tool()
     async def pdf(
@@ -487,12 +486,11 @@ def create_server() -> FastMCP:
             format: Page format — 'A4', 'Letter', 'Legal'.
             print_background: Include background graphics.
         """
-        result = await handle_pdf(_session, {
+        return await _safe_call(handle_pdf, _session, {
             "page_id": page_id,
             "format": format,
             "print_background": print_background,
         })
-        return json.dumps(result)
 
     return mcp
 

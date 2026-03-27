@@ -112,6 +112,7 @@ async def handle_navigate(session: BrowserSession, params: dict) -> dict:
 
     title = await page.title()
     return {
+        "status": "navigated",
         "url": page.url,
         "title": title,
     }

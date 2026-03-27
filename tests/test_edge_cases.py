@@ -154,6 +154,82 @@ class TestScrollEdge:
         assert "-200" in call_args
 
 
+class TestNavigateStatus:
+    """Test navigate returns status field."""
+
+    @pytest.mark.asyncio
+    async def test_navigate_returns_status(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.goto = AsyncMock()
+        mock_page.url = "https://example.com"
+        mock_page.title = AsyncMock(return_value="Example")
+
+        result = await handle_navigate(session, {
+            "page_id": "page_001",
+            "url": "https://example.com",
+        })
+
+        assert result["status"] == "navigated"
+        assert result["url"] == "https://example.com"
+        assert result["title"] == "Example"
+
+
+class TestServerErrorHandling:
+    """Test that _safe_call wraps errors into clean JSON responses."""
+
+    @pytest.mark.asyncio
+    async def test_safe_call_key_error(self):
+        from cloakbrowsermcp.server import _safe_call
+        import json
+
+        async def bad_handler(session, params):
+            raise KeyError("page_xyz")
+
+        result = await _safe_call(bad_handler, None, {})
+        parsed = json.loads(result)
+        assert "error" in parsed
+        assert "page_xyz" in parsed["error"]
+
+    @pytest.mark.asyncio
+    async def test_safe_call_runtime_error(self):
+        from cloakbrowsermcp.server import _safe_call
+        import json
+
+        async def bad_handler(session, params):
+            raise RuntimeError("Browser is not running. Call launch() first.")
+
+        result = await _safe_call(bad_handler, None, {})
+        parsed = json.loads(result)
+        assert "error" in parsed
+        assert "Browser is not running" in parsed["error"]
+
+    @pytest.mark.asyncio
+    async def test_safe_call_generic_exception(self):
+        from cloakbrowsermcp.server import _safe_call
+        import json
+
+        async def bad_handler(session, params):
+            raise ValueError("unexpected value")
+
+        result = await _safe_call(bad_handler, None, {})
+        parsed = json.loads(result)
+        assert "error" in parsed
+        assert "ValueError" in parsed["error"]
+
+    @pytest.mark.asyncio
+    async def test_safe_call_success(self):
+        from cloakbrowsermcp.server import _safe_call
+        import json
+
+        async def good_handler(session, params):
+            return {"status": "ok", "data": 42}
+
+        result = await _safe_call(good_handler, None, {})
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+        assert parsed["data"] == 42
+
+
 class TestSessionMultiPage:
     """Test multi-page management."""
 
