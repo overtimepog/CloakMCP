@@ -1,0 +1,225 @@
+"""Tests for error handling and edge cases across the tool handlers."""
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+from cloakbrowsermcp.tools import (
+    handle_navigate,
+    handle_click,
+    handle_type_text,
+    handle_screenshot,
+    handle_evaluate,
+    handle_wait_for_selector,
+    handle_scroll,
+)
+from cloakbrowsermcp.session import BrowserSession
+
+
+def _make_session_with_page():
+    """Create a mock session with a browser and page ready."""
+    session = MagicMock(spec=BrowserSession)
+    session.is_running = True
+
+    mock_page = AsyncMock()
+    mock_page.url = "https://example.com"
+    mock_page.title = AsyncMock(return_value="Example")
+    mock_page.content = AsyncMock(return_value="<html><body>Hello</body></html>")
+
+    session.get_page = MagicMock(return_value=mock_page)
+    session.pages = {"page_001": mock_page}
+
+    return session, mock_page
+
+
+class TestNavigateErrors:
+    """Test error handling in navigate."""
+
+    @pytest.mark.asyncio
+    async def test_navigate_page_not_found(self):
+        session = MagicMock(spec=BrowserSession)
+        session.get_page = MagicMock(side_effect=KeyError("no_page"))
+
+        with pytest.raises(KeyError):
+            await handle_navigate(session, {
+                "page_id": "no_page",
+                "url": "https://example.com",
+            })
+
+    @pytest.mark.asyncio
+    async def test_navigate_timeout(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.goto = AsyncMock(side_effect=PlaywrightTimeoutError("Timeout"))
+
+        with pytest.raises(PlaywrightTimeoutError):
+            await handle_navigate(session, {
+                "page_id": "page_001",
+                "url": "https://slow-site.com",
+                "timeout": 1000,
+            })
+
+
+class TestClickErrors:
+    """Test error handling in click."""
+
+    @pytest.mark.asyncio
+    async def test_click_element_not_found(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.click = AsyncMock(side_effect=PlaywrightTimeoutError("Element not found"))
+
+        with pytest.raises(PlaywrightTimeoutError):
+            await handle_click(session, {
+                "page_id": "page_001",
+                "selector": "#nonexistent",
+            })
+
+
+class TestTypeErrors:
+    """Test error handling in type_text."""
+
+    @pytest.mark.asyncio
+    async def test_type_empty_text(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.type = AsyncMock()
+
+        result = await handle_type_text(session, {
+            "page_id": "page_001",
+            "selector": "input",
+            "text": "",
+        })
+
+        assert result["status"] == "typed"
+        assert result["length"] == 0
+
+
+class TestScreenshotEdge:
+    """Test screenshot edge cases."""
+
+    @pytest.mark.asyncio
+    async def test_screenshot_default_no_fullpage(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.screenshot = AsyncMock(return_value=b"\x89PNG")
+
+        result = await handle_screenshot(session, {"page_id": "page_001"})
+
+        call_kwargs = mock_page.screenshot.call_args.kwargs
+        assert call_kwargs.get("full_page", False) is False
+
+
+class TestEvaluateEdge:
+    """Test evaluate edge cases."""
+
+    @pytest.mark.asyncio
+    async def test_evaluate_returns_none(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.evaluate = AsyncMock(return_value=None)
+
+        result = await handle_evaluate(session, {
+            "page_id": "page_001",
+            "expression": "undefined",
+        })
+
+        assert result["result"] is None
+
+    @pytest.mark.asyncio
+    async def test_evaluate_returns_list(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.evaluate = AsyncMock(return_value=[1, 2, 3])
+
+        result = await handle_evaluate(session, {
+            "page_id": "page_001",
+            "expression": "[1, 2, 3]",
+        })
+
+        assert result["result"] == [1, 2, 3]
+
+
+class TestScrollEdge:
+    """Test scroll edge cases."""
+
+    @pytest.mark.asyncio
+    async def test_scroll_up(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.evaluate = AsyncMock()
+
+        result = await handle_scroll(session, {
+            "page_id": "page_001",
+            "direction": "up",
+            "amount": 200,
+        })
+
+        assert result["direction"] == "up"
+        # Verify negative scroll value was passed
+        call_args = mock_page.evaluate.call_args[0][0]
+        assert "-200" in call_args
+
+
+class TestSessionMultiPage:
+    """Test multi-page management."""
+
+    @pytest.mark.asyncio
+    async def test_multiple_pages(self):
+        from cloakbrowsermcp.session import BrowserSession, SessionConfig
+
+        session = BrowserSession()
+        cfg = SessionConfig()
+
+        with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
+            mock_browser = AsyncMock()
+
+            pages_created = []
+            async def make_page():
+                mock_page = AsyncMock()
+                mock_page.url = "about:blank"
+                mock_page.title = AsyncMock(return_value="")
+                pages_created.append(mock_page)
+                return mock_page
+
+            mock_context = AsyncMock()
+            mock_context.new_page = make_page
+            mock_browser.new_context = AsyncMock(return_value=mock_context)
+            mock_launch.return_value = mock_browser
+
+            await session.launch(cfg)
+
+            id1 = await session.new_page()
+            id2 = await session.new_page()
+            id3 = await session.new_page()
+
+            assert len(session.pages) == 3
+            assert id1 != id2 != id3
+
+            page_list = session.list_pages()
+            assert len(page_list) == 3
+
+    @pytest.mark.asyncio
+    async def test_close_all_pages_on_browser_close(self):
+        from cloakbrowsermcp.session import BrowserSession, SessionConfig
+
+        session = BrowserSession()
+        cfg = SessionConfig()
+
+        with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
+            mock_browser = AsyncMock()
+
+            async def make_page():
+                mock_page = AsyncMock()
+                mock_page.url = "about:blank"
+                mock_page.title = AsyncMock(return_value="")
+                return mock_page
+
+            mock_context = AsyncMock()
+            mock_context.new_page = make_page
+            mock_browser.new_context = AsyncMock(return_value=mock_context)
+            mock_launch.return_value = mock_browser
+
+            await session.launch(cfg)
+            await session.new_page()
+            await session.new_page()
+
+            assert len(session.pages) == 2
+
+            await session.close()
+
+            assert len(session.pages) == 0
+            assert session.is_running is False
