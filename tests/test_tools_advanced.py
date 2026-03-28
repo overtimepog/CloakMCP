@@ -1,4 +1,4 @@
-"""Tests for advanced tools — stealth configuration, detection testing, multi-page orchestration."""
+"""Tests for advanced tools — stealth configuration, network interception, navigation helpers."""
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,7 +15,6 @@ from cloakbrowsermcp.tools_advanced import (
     handle_set_viewport,
     handle_emulate_media,
     handle_add_init_script,
-    handle_expose_function,
 )
 from cloakbrowsermcp.session import BrowserSession
 
@@ -216,19 +215,3 @@ class TestInitScript:
 
         mock_page.add_init_script.assert_called_once_with("window.__test = true;")
         assert result["status"] == "added"
-
-
-class TestExposeFunction:
-    """Test exposing functions to the page."""
-
-    @pytest.mark.asyncio
-    async def test_expose_function(self):
-        session, mock_page = _make_session_with_page()
-        mock_page.expose_function = AsyncMock()
-
-        result = await handle_expose_function(session, {
-            "page_id": "page_001",
-            "name": "myCallback",
-        })
-
-        assert result["status"] == "exposed"

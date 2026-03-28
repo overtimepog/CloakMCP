@@ -12,6 +12,9 @@ from cloakbrowsermcp.tools import (
     handle_evaluate,
     handle_wait_for_selector,
     handle_scroll,
+    handle_snapshot,
+    handle_click_ref,
+    handle_type_ref,
 )
 from cloakbrowsermcp.session import BrowserSession
 
@@ -28,6 +31,8 @@ def _make_session_with_page():
 
     session.get_page = MagicMock(return_value=mock_page)
     session.pages = {"page_001": mock_page}
+    session.set_refs = MagicMock()
+    session.get_refs = MagicMock(return_value={})
 
     return session, mock_page
 
@@ -104,6 +109,8 @@ class TestScreenshotEdge:
 
         call_kwargs = mock_page.screenshot.call_args.kwargs
         assert call_kwargs.get("full_page", False) is False
+        # Should return file path, not base64
+        assert "path" in result
 
 
 class TestEvaluateEdge:
@@ -230,6 +237,41 @@ class TestServerErrorHandling:
         assert parsed["data"] == 42
 
 
+class TestSnapshotEdgeCases:
+    """Test snapshot edge cases."""
+
+    @pytest.mark.asyncio
+    async def test_click_ref_handles_failed_click(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.click = AsyncMock(side_effect=PlaywrightTimeoutError("Element gone"))
+        session.get_refs = MagicMock(return_value={
+            "e1": {"selector": "button.gone", "tag": "button"}
+        })
+
+        result = await handle_click_ref(session, {
+            "page_id": "page_001",
+            "ref": "@e1",
+        })
+
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_type_ref_handles_failed_type(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.fill = AsyncMock(side_effect=PlaywrightTimeoutError("Element gone"))
+        session.get_refs = MagicMock(return_value={
+            "e1": {"selector": "input.gone", "tag": "input"}
+        })
+
+        result = await handle_type_ref(session, {
+            "page_id": "page_001",
+            "ref": "@e1",
+            "text": "hello",
+        })
+
+        assert "error" in result
+
+
 class TestSessionMultiPage:
     """Test multi-page management."""
 
@@ -248,6 +290,7 @@ class TestSessionMultiPage:
                 mock_page = AsyncMock()
                 mock_page.url = "about:blank"
                 mock_page.title = AsyncMock(return_value="")
+                mock_page.on = MagicMock()
                 pages_created.append(mock_page)
                 return mock_page
 
@@ -282,6 +325,7 @@ class TestSessionMultiPage:
                 mock_page = AsyncMock()
                 mock_page.url = "about:blank"
                 mock_page.title = AsyncMock(return_value="")
+                mock_page.on = MagicMock()
                 return mock_page
 
             mock_context = AsyncMock()

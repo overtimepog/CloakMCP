@@ -55,11 +55,62 @@ class BrowserSession:
         self.pages: dict[str, Any] = {}
         self.config: SessionConfig | None = None
         self._route_handlers: dict[str, Any] = {}
+        # Ref IDs from snapshot, keyed by page_id
+        self._refs: dict[str, dict[str, dict]] = {}
+        # Console messages captured per page
+        self._console_messages: dict[str, list[dict]] = {}
 
     @property
     def is_running(self) -> bool:
         """Whether the browser is currently running."""
         return self._browser is not None or self._context is not None
+
+    # -----------------------------------------------------------------------
+    # Ref management (for snapshot -> click_ref/type_ref workflow)
+    # -----------------------------------------------------------------------
+
+    def set_refs(self, page_id: str, refs: dict[str, dict]) -> None:
+        """Store ref IDs from a snapshot for a page."""
+        self._refs[page_id] = refs
+
+    def get_refs(self, page_id: str) -> dict[str, dict]:
+        """Get stored ref IDs for a page. Returns empty dict if no snapshot taken."""
+        return self._refs.get(page_id, {})
+
+    # -----------------------------------------------------------------------
+    # Console message management
+    # -----------------------------------------------------------------------
+
+    def get_console_messages(self, page_id: str) -> list[dict]:
+        """Get captured console messages for a page."""
+        return self._console_messages.get(page_id, [])
+
+    def clear_console_messages(self, page_id: str) -> None:
+        """Clear captured console messages for a page."""
+        self._console_messages[page_id] = []
+
+    def _setup_console_capture(self, page_id: str, page: Any) -> None:
+        """Set up console message capture for a page."""
+        self._console_messages[page_id] = []
+
+        def on_console(msg):
+            self._console_messages.setdefault(page_id, []).append({
+                "type": msg.type,
+                "text": msg.text,
+            })
+
+        def on_page_error(error):
+            self._console_messages.setdefault(page_id, []).append({
+                "type": "error",
+                "text": f"[PageError] {error}",
+            })
+
+        page.on("console", on_console)
+        page.on("pageerror", on_page_error)
+
+    # -----------------------------------------------------------------------
+    # Browser lifecycle
+    # -----------------------------------------------------------------------
 
     async def launch(self, config: SessionConfig) -> None:
         """Launch a CloakBrowser instance with the given configuration."""
@@ -134,6 +185,8 @@ class BrowserSession:
                 pass
         self.pages.clear()
         self._route_handlers.clear()
+        self._refs.clear()
+        self._console_messages.clear()
 
         # Close browser/context
         try:
@@ -167,6 +220,9 @@ class BrowserSession:
         page_id = f"page_{uuid.uuid4().hex[:8]}"
         self.pages[page_id] = page
 
+        # Set up console capture
+        self._setup_console_capture(page_id, page)
+
         logger.debug("New page created: %s", page_id)
         return page_id
 
@@ -181,6 +237,8 @@ class BrowserSession:
         page = self.get_page(page_id)
         await page.close()
         del self.pages[page_id]
+        self._refs.pop(page_id, None)
+        self._console_messages.pop(page_id, None)
         logger.debug("Page closed: %s", page_id)
 
     def list_pages(self) -> list[dict[str, str]]:

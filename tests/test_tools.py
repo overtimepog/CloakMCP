@@ -25,6 +25,14 @@ from cloakbrowsermcp.tools import (
     handle_set_cookies,
     handle_get_page_info,
     handle_pdf,
+    handle_snapshot,
+    handle_click_ref,
+    handle_type_ref,
+    handle_get_console,
+    handle_smart_action,
+    handle_get_text,
+    handle_get_links,
+    handle_get_form_fields,
 )
 from cloakbrowsermcp.session import BrowserSession, SessionConfig
 
@@ -41,6 +49,10 @@ def _make_session_with_page():
 
     session.get_page = MagicMock(return_value=mock_page)
     session.pages = {"page_001": mock_page}
+    session.set_refs = MagicMock()
+    session.get_refs = MagicMock(return_value={})
+    session.get_console_messages = MagicMock(return_value=[])
+    session.clear_console_messages = MagicMock()
 
     return session, mock_page
 
@@ -249,14 +261,15 @@ class TestScreenshot:
     """Test screenshot tool."""
 
     @pytest.mark.asyncio
-    async def test_screenshot_returns_base64(self):
+    async def test_screenshot_returns_file_path(self):
         session, mock_page = _make_session_with_page()
         mock_page.screenshot = AsyncMock(return_value=b"\x89PNG\r\n")
 
         result = await handle_screenshot(session, {"page_id": "page_001"})
 
-        assert "data" in result
+        assert "path" in result
         assert result["mime_type"] == "image/png"
+        assert result["size_bytes"] > 0
 
     @pytest.mark.asyncio
     async def test_screenshot_full_page(self):
@@ -284,7 +297,7 @@ class TestScreenshot:
         })
 
         mock_page.locator.assert_called_once_with("#main-content")
-        assert "data" in result
+        assert "path" in result
 
 
 class TestGetContent:
@@ -535,5 +548,251 @@ class TestPdf:
 
         result = await handle_pdf(session, {"page_id": "page_001"})
 
-        assert "data" in result
+        assert "path" in result
         assert result["mime_type"] == "application/pdf"
+        assert result["size_bytes"] > 0
+
+
+# ---------------------------------------------------------------------------
+# New tools: snapshot, click_ref, type_ref, get_console
+# ---------------------------------------------------------------------------
+
+class TestSnapshot:
+    """Test snapshot tool — accessibility tree with ref IDs."""
+
+    @pytest.mark.asyncio
+    async def test_snapshot_returns_text(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.evaluate = AsyncMock(return_value={
+            "snapshot": 'Page: Example\nURL: https://example.com\n---\n[@e1] button "Submit"',
+            "ref_count": 1,
+            "refs": {"e1": {"selector": "button#submit", "tag": "button"}},
+        })
+
+        result = await handle_snapshot(session, {"page_id": "page_001"})
+
+        assert "snapshot" in result
+        assert "[@e1]" in result["snapshot"]
+        assert result["interactive_elements"] == 1
+        session.set_refs.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_snapshot_truncation(self):
+        session, mock_page = _make_session_with_page()
+        long_snapshot = "x" * 10000
+        mock_page.evaluate = AsyncMock(return_value={
+            "snapshot": long_snapshot,
+            "ref_count": 100,
+            "refs": {},
+        })
+
+        result = await handle_snapshot(session, {
+            "page_id": "page_001",
+            "max_length": 500,
+        })
+
+        assert result["truncated"] is True
+        assert len(result["snapshot"]) < len(long_snapshot)
+
+
+class TestClickRef:
+    """Test click_ref tool — click by ref ID from snapshot."""
+
+    @pytest.mark.asyncio
+    async def test_click_ref_success(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.click = AsyncMock()
+        session.get_refs = MagicMock(return_value={
+            "e1": {"selector": "button#submit", "tag": "button"}
+        })
+
+        result = await handle_click_ref(session, {
+            "page_id": "page_001",
+            "ref": "@e1",
+        })
+
+        mock_page.click.assert_called_once_with("button#submit", timeout=5000)
+        assert result["status"] == "clicked"
+
+    @pytest.mark.asyncio
+    async def test_click_ref_not_found(self):
+        session, mock_page = _make_session_with_page()
+        session.get_refs = MagicMock(return_value={})
+
+        result = await handle_click_ref(session, {
+            "page_id": "page_001",
+            "ref": "@e99",
+        })
+
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_click_ref_without_at_prefix(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.click = AsyncMock()
+        session.get_refs = MagicMock(return_value={
+            "e5": {"selector": "a.link", "tag": "a"}
+        })
+
+        result = await handle_click_ref(session, {
+            "page_id": "page_001",
+            "ref": "e5",
+        })
+
+        assert result["status"] == "clicked"
+
+
+class TestTypeRef:
+    """Test type_ref tool — type into input by ref ID."""
+
+    @pytest.mark.asyncio
+    async def test_type_ref_success(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.fill = AsyncMock()
+        mock_page.type = AsyncMock()
+        session.get_refs = MagicMock(return_value={
+            "e3": {"selector": "input#email", "tag": "input"}
+        })
+
+        result = await handle_type_ref(session, {
+            "page_id": "page_001",
+            "ref": "@e3",
+            "text": "user@example.com",
+        })
+
+        assert result["status"] == "typed"
+        # Should clear first by default
+        mock_page.fill.assert_called_once_with("input#email", "")
+        mock_page.type.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_type_ref_no_clear(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.fill = AsyncMock()
+        mock_page.type = AsyncMock()
+        session.get_refs = MagicMock(return_value={
+            "e3": {"selector": "input#email", "tag": "input"}
+        })
+
+        result = await handle_type_ref(session, {
+            "page_id": "page_001",
+            "ref": "@e3",
+            "text": "append this",
+            "clear": False,
+        })
+
+        assert result["status"] == "typed"
+        mock_page.fill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_type_ref_not_found(self):
+        session, mock_page = _make_session_with_page()
+        session.get_refs = MagicMock(return_value={})
+
+        result = await handle_type_ref(session, {
+            "page_id": "page_001",
+            "ref": "@e99",
+            "text": "hello",
+        })
+
+        assert "error" in result
+
+
+class TestGetConsole:
+    """Test get_console tool."""
+
+    @pytest.mark.asyncio
+    async def test_get_console_messages(self):
+        session, mock_page = _make_session_with_page()
+        session.get_console_messages = MagicMock(return_value=[
+            {"type": "log", "text": "Hello from console"},
+            {"type": "error", "text": "Something failed"},
+        ])
+
+        result = await handle_get_console(session, {"page_id": "page_001"})
+
+        assert result["total"] == 2
+        assert len(result["messages"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_get_console_with_clear(self):
+        session, mock_page = _make_session_with_page()
+        session.get_console_messages = MagicMock(return_value=[])
+
+        result = await handle_get_console(session, {
+            "page_id": "page_001",
+            "clear": True,
+        })
+
+        session.clear_console_messages.assert_called_once_with("page_001")
+
+
+class TestGetText:
+    """Test get_text tool."""
+
+    @pytest.mark.asyncio
+    async def test_get_text_basic(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.inner_text = AsyncMock(return_value="Hello World\n\n\n\nExtra space")
+
+        result = await handle_get_text(session, {"page_id": "page_001"})
+
+        assert "Hello World" in result["text"]
+        assert result["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_get_text_truncation(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.inner_text = AsyncMock(return_value="x" * 100000)
+
+        result = await handle_get_text(session, {
+            "page_id": "page_001",
+            "max_length": 1000,
+        })
+
+        assert result["truncated"] is True
+
+
+class TestSmartAction:
+    """Test smart_action tool."""
+
+    @pytest.mark.asyncio
+    async def test_smart_action_click(self):
+        session, mock_page = _make_session_with_page()
+
+        mock_locator = AsyncMock()
+        mock_locator.count = AsyncMock(return_value=1)
+        mock_locator.first = AsyncMock()
+        mock_locator.first.click = AsyncMock()
+
+        mock_page.get_by_text = MagicMock(return_value=mock_locator)
+
+        result = await handle_smart_action(session, {
+            "page_id": "page_001",
+            "text": "Submit",
+        })
+
+        assert result["status"] == "clicked"
+
+    @pytest.mark.asyncio
+    async def test_smart_action_not_found(self):
+        session, mock_page = _make_session_with_page()
+
+        # All strategies fail
+        mock_locator = AsyncMock()
+        mock_locator.count = AsyncMock(return_value=0)
+        mock_page.get_by_text = MagicMock(return_value=mock_locator)
+        mock_page.get_by_role = MagicMock(return_value=mock_locator)
+        mock_page.get_by_label = MagicMock(return_value=mock_locator)
+        mock_page.get_by_placeholder = MagicMock(return_value=mock_locator)
+        mock_page.get_by_title = MagicMock(return_value=mock_locator)
+        mock_page.get_by_alt_text = MagicMock(return_value=mock_locator)
+        mock_page.click = AsyncMock(side_effect=Exception("not found"))
+
+        result = await handle_smart_action(session, {
+            "page_id": "page_001",
+            "text": "Nonexistent Button",
+        })
+
+        assert result["status"] == "not_found"
+        assert "hint" in result

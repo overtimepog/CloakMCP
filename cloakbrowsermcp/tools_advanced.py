@@ -174,24 +174,3 @@ async def handle_add_init_script(session: BrowserSession, params: dict) -> dict:
     await page.add_init_script(script)
 
     return {"status": "added", "script_length": len(script)}
-
-
-async def handle_expose_function(session: BrowserSession, params: dict) -> dict:
-    """Expose a callback function to the page.
-
-    The function will be available as window.<name>() in page JS.
-    When called from the page, it sends a notification back.
-    """
-    page = session.get_page(params["page_id"])
-    name = params["name"]
-
-    # The exposed function captures calls and logs them
-    calls: list[dict] = []
-
-    async def callback(*args):
-        calls.append({"name": name, "args": list(args)})
-        logger.info("Exposed function '%s' called with args: %s", name, args)
-
-    await page.expose_function(name, callback)
-
-    return {"status": "exposed", "name": name}

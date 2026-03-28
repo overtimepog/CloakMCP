@@ -51,6 +51,15 @@ class TestSessionConfig:
         assert cfg.user_data_dir == "/tmp/profile"
 
 
+def _make_mock_page():
+    """Create a mock page that supports event handlers."""
+    mock_page = AsyncMock()
+    mock_page.url = "about:blank"
+    mock_page.title = AsyncMock(return_value="")
+    mock_page.on = MagicMock()  # Accept event handler registration
+    return mock_page
+
+
 class TestBrowserSession:
     """Test BrowserSession lifecycle."""
 
@@ -161,9 +170,7 @@ class TestBrowserSession:
 
         with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
             mock_browser = AsyncMock()
-            mock_page = AsyncMock()
-            mock_page.url = "about:blank"
-            mock_page.title = AsyncMock(return_value="")
+            mock_page = _make_mock_page()
 
             mock_context = AsyncMock()
             mock_context.new_page = AsyncMock(return_value=mock_page)
@@ -176,6 +183,8 @@ class TestBrowserSession:
 
             assert page_id in session.pages
             assert session.pages[page_id] is mock_page
+            # Console capture should be set up
+            assert mock_page.on.call_count >= 2  # console + pageerror
 
     @pytest.mark.asyncio
     async def test_close_page(self):
@@ -184,9 +193,7 @@ class TestBrowserSession:
 
         with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
             mock_browser = AsyncMock()
-            mock_page = AsyncMock()
-            mock_page.url = "about:blank"
-            mock_page.title = AsyncMock(return_value="")
+            mock_page = _make_mock_page()
 
             mock_context = AsyncMock()
             mock_context.new_page = AsyncMock(return_value=mock_page)
@@ -214,9 +221,7 @@ class TestBrowserSession:
 
         with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
             mock_browser = AsyncMock()
-            mock_page = AsyncMock()
-            mock_page.url = "about:blank"
-            mock_page.title = AsyncMock(return_value="")
+            mock_page = _make_mock_page()
 
             mock_context = AsyncMock()
             mock_context.new_page = AsyncMock(return_value=mock_page)
@@ -234,3 +239,53 @@ class TestBrowserSession:
         session = BrowserSession()
         with pytest.raises(KeyError, match="no_such_page"):
             session.get_page("no_such_page")
+
+
+class TestRefManagement:
+    """Test ref ID storage and retrieval."""
+
+    def test_set_and_get_refs(self):
+        session = BrowserSession()
+        refs = {
+            "e1": {"selector": "button#submit", "tag": "button"},
+            "e2": {"selector": "input#email", "tag": "input"},
+        }
+        session.set_refs("page_001", refs)
+
+        assert session.get_refs("page_001") == refs
+
+    def test_get_refs_empty_page(self):
+        session = BrowserSession()
+        assert session.get_refs("nonexistent") == {}
+
+    @pytest.mark.asyncio
+    async def test_refs_cleared_on_close(self):
+        session = BrowserSession()
+        cfg = SessionConfig()
+
+        with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
+            mock_browser = AsyncMock()
+            mock_launch.return_value = mock_browser
+
+            await session.launch(cfg)
+
+            session.set_refs("page_001", {"e1": {"selector": "x"}})
+            await session.close()
+
+            assert session.get_refs("page_001") == {}
+
+
+class TestConsoleCapture:
+    """Test console message capture."""
+
+    def test_console_messages_empty_by_default(self):
+        session = BrowserSession()
+        assert session.get_console_messages("page_001") == []
+
+    def test_clear_console_messages(self):
+        session = BrowserSession()
+        session._console_messages["page_001"] = [
+            {"type": "log", "text": "hello"},
+        ]
+        session.clear_console_messages("page_001")
+        assert session.get_console_messages("page_001") == []

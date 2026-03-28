@@ -12,7 +12,7 @@ class TestServerCreation:
     def test_create_server_returns_mcp_instance(self):
         server = create_server()
         assert server is not None
-        assert server.name == "CloakBrowserMCP"
+        assert server.name == "cloakbrowser"
 
     def test_server_has_tools(self):
         server = create_server()
@@ -24,27 +24,59 @@ class TestToolRegistration:
     """Test all expected tools are registered on the server."""
 
     EXPECTED_TOOLS = [
+        # Browser lifecycle
         "launch_browser",
         "close_browser",
+        # Page management
         "new_page",
         "close_page",
+        "list_pages",
+        # Snapshot & ref-based navigation
+        "snapshot",
+        "click_ref",
+        "type_ref",
+        # Navigation
         "navigate",
+        "go_back",
+        "go_forward",
+        "reload",
+        "wait_for_navigation",
+        # Interaction
         "click",
+        "smart_action",
         "type_text",
         "fill_form",
-        "screenshot",
-        "get_content",
-        "evaluate",
-        "wait_for_selector",
         "hover",
         "select_option",
         "press_key",
         "scroll",
+        # Content extraction
+        "get_text",
+        "get_links",
+        "get_form_fields",
+        "screenshot",
+        "get_content",
+        "evaluate",
+        "wait_for_selector",
+        # Console
+        "get_console",
+        # Cookies
         "get_cookies",
         "set_cookies",
+        # Page info & export
         "get_page_info",
         "pdf",
-        "list_pages",
+        # Viewport & media
+        "set_viewport",
+        "emulate_media",
+        # Network interception
+        "network_intercept",
+        "network_continue",
+        # Page scripting
+        "add_init_script",
+        # Stealth inspection
+        "stealth_config",
+        "binary_info",
     ]
 
     def test_all_tools_registered(self):
@@ -75,7 +107,6 @@ class TestToolSchemas:
         tools = server._tool_manager._tools
 
         launch_tool = tools["launch_browser"]
-        # Should accept optional parameters
         assert launch_tool is not None
 
     def test_navigate_requires_url(self):
@@ -85,9 +116,16 @@ class TestToolSchemas:
         nav_tool = tools["navigate"]
         assert nav_tool is not None
 
-    def test_click_requires_selector(self):
+    def test_snapshot_tool_exists(self):
         server = create_server()
         tools = server._tool_manager._tools
 
-        click_tool = tools["click"]
-        assert click_tool is not None
+        snapshot_tool = tools["snapshot"]
+        assert snapshot_tool is not None
+
+    def test_click_ref_tool_exists(self):
+        server = create_server()
+        tools = server._tool_manager._tools
+
+        click_ref_tool = tools["click_ref"]
+        assert click_ref_tool is not None
