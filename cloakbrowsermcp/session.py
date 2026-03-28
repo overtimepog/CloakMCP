@@ -16,6 +16,21 @@ from cloakbrowser import launch_async, launch_persistent_context_async
 logger = logging.getLogger("cloakbrowsermcp")
 
 
+class BrowserSessionError(RuntimeError):
+    """Raised when the browser session is in an invalid state."""
+    pass
+
+
+class PageNotFoundError(KeyError):
+    """Raised when a page_id doesn't exist in the session."""
+    pass
+
+
+class PageClosedError(BrowserSessionError):
+    """Raised when a page exists in tracking but is actually closed/crashed."""
+    pass
+
+
 @dataclass
 class SessionConfig:
     """Configuration for launching a CloakBrowser session.
@@ -62,8 +77,43 @@ class BrowserSession:
 
     @property
     def is_running(self) -> bool:
-        """Whether the browser is currently running."""
-        return self._browser is not None or self._context is not None
+        """Whether the browser is currently running and responsive.
+
+        Checks not just that we hold a reference, but that the underlying
+        browser process is still connected.
+        """
+        if self._is_persistent and self._context is not None:
+            try:
+                # Persistent context — check if still usable
+                # Playwright contexts don't have .is_connected(), but
+                # the browser behind them does. For persistent contexts
+                # we check if we can still list pages.
+                return True
+            except Exception:
+                return False
+        if self._browser is not None:
+            try:
+                return self._browser.is_connected()
+            except Exception:
+                return False
+        return False
+
+    def _check_browser_alive(self) -> None:
+        """Verify the browser is alive; force-cleanup stale state if not.
+
+        Call this before any operation that needs the browser.
+        Raises BrowserSessionError with a helpful message.
+        """
+        if self._browser is None and self._context is None:
+            return  # Not running, nothing to check
+
+        if not self.is_running:
+            logger.warning("Browser process died — cleaning up stale session state")
+            self._force_cleanup()
+            raise BrowserSessionError(
+                "Browser process has died or been disconnected. "
+                "Call launch_browser() to start a new session."
+            )
 
     # -----------------------------------------------------------------------
     # Ref management (for snapshot -> click_ref/type_ref workflow)
@@ -109,6 +159,27 @@ class BrowserSession:
         page.on("pageerror", on_page_error)
 
     # -----------------------------------------------------------------------
+    # Stale session cleanup
+    # -----------------------------------------------------------------------
+
+    def _force_cleanup(self) -> None:
+        """Synchronously reset all internal state when the browser has died.
+
+        This does NOT call async close methods — those would fail on a dead
+        process. Instead it just wipes references so the session can be
+        relaunched cleanly.
+        """
+        self.pages.clear()
+        self._route_handlers.clear()
+        self._refs.clear()
+        self._console_messages.clear()
+        self._browser = None
+        self._context = None
+        self.config = None
+        self._is_persistent = False
+        logger.info("Stale browser session cleaned up")
+
+    # -----------------------------------------------------------------------
     # Browser lifecycle
     # -----------------------------------------------------------------------
 
@@ -116,6 +187,9 @@ class BrowserSession:
         """Launch a CloakBrowser instance with the given configuration."""
         if self.is_running:
             await self.close()
+        elif self._browser is not None or self._context is not None:
+            # Browser reference exists but process is dead — clean up
+            self._force_cleanup()
 
         self.config = config
 
@@ -205,8 +279,9 @@ class BrowserSession:
 
     async def new_page(self) -> str:
         """Create a new page and return its ID."""
+        self._check_browser_alive()
         if not self.is_running:
-            raise RuntimeError("Browser is not running. Call launch() first.")
+            raise BrowserSessionError("Browser is not running. Call launch_browser() first.")
 
         if self._is_persistent:
             page = await self._context.new_page()
@@ -227,10 +302,36 @@ class BrowserSession:
         return page_id
 
     def get_page(self, page_id: str) -> Any:
-        """Get a page by its ID. Raises KeyError if not found."""
+        """Get a page by its ID.
+
+        Raises PageNotFoundError if the page_id doesn't exist.
+        Raises PageClosedError if the page exists but has been closed/crashed.
+        Raises BrowserSessionError if the browser process has died.
+        """
+        self._check_browser_alive()
+
         if page_id not in self.pages:
-            raise KeyError(f"Page not found: {page_id}")
-        return self.pages[page_id]
+            available = list(self.pages.keys())
+            raise PageNotFoundError(
+                f"Page '{page_id}' not found. "
+                + (f"Available pages: {available}" if available
+                   else "No pages open. Call launch_browser() to start a new session.")
+            )
+
+        page = self.pages[page_id]
+
+        # Check if the page is still alive (Playwright sets is_closed())
+        if page.is_closed():
+            # Clean up the dead page from tracking
+            del self.pages[page_id]
+            self._refs.pop(page_id, None)
+            self._console_messages.pop(page_id, None)
+            raise PageClosedError(
+                f"Page '{page_id}' has been closed or crashed. "
+                "Use new_page() to create a new one, or launch_browser() to restart."
+            )
+
+        return page
 
     async def close_page(self, page_id: str) -> None:
         """Close a specific page by ID."""

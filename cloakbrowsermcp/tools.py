@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .session import BrowserSession, SessionConfig
+from .session import BrowserSession, SessionConfig, BrowserSessionError, PageNotFoundError, PageClosedError
 
 logger = logging.getLogger("cloakbrowsermcp")
 
@@ -317,6 +317,11 @@ async def handle_launch_browser(session: BrowserSession, params: dict) -> dict:
     """Launch a stealth CloakBrowser instance."""
     if session.is_running:
         return {"status": "Already running. Close first or use existing session.", "pages": session.list_pages()}
+
+    # Clean up stale state if browser died but references linger
+    if session._browser is not None or session._context is not None:
+        logger.warning("Stale browser references detected on launch — cleaning up")
+        session._force_cleanup()
 
     cfg = SessionConfig(
         headless=params.get("headless", True),

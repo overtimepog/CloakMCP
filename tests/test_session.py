@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from cloakbrowsermcp.session import BrowserSession, SessionConfig
+from cloakbrowsermcp.session import BrowserSession, SessionConfig, BrowserSessionError, PageNotFoundError, PageClosedError
 
 
 class TestSessionConfig:
@@ -51,13 +51,21 @@ class TestSessionConfig:
         assert cfg.user_data_dir == "/tmp/profile"
 
 
-def _make_mock_page():
+def _make_mock_page(closed=False):
     """Create a mock page that supports event handlers."""
     mock_page = AsyncMock()
     mock_page.url = "about:blank"
     mock_page.title = AsyncMock(return_value="")
     mock_page.on = MagicMock()  # Accept event handler registration
+    mock_page.is_closed = MagicMock(return_value=closed)
     return mock_page
+
+
+def _make_mock_browser(connected=True):
+    """Create a mock browser that supports is_connected()."""
+    mock_browser = AsyncMock()
+    mock_browser.is_connected = MagicMock(return_value=connected)
+    return mock_browser
 
 
 class TestBrowserSession:
@@ -75,7 +83,7 @@ class TestBrowserSession:
         cfg = SessionConfig()
 
         with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
-            mock_browser = AsyncMock()
+            mock_browser = _make_mock_browser()
             mock_launch.return_value = mock_browser
 
             await session.launch(cfg)
@@ -90,7 +98,7 @@ class TestBrowserSession:
         cfg = SessionConfig(proxy="http://user:pass@proxy:8080")
 
         with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
-            mock_browser = AsyncMock()
+            mock_browser = _make_mock_browser()
             mock_launch.return_value = mock_browser
 
             await session.launch(cfg)
@@ -104,7 +112,7 @@ class TestBrowserSession:
         cfg = SessionConfig(humanize=True, human_preset="careful")
 
         with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
-            mock_browser = AsyncMock()
+            mock_browser = _make_mock_browser()
             mock_launch.return_value = mock_browser
 
             await session.launch(cfg)
@@ -133,7 +141,7 @@ class TestBrowserSession:
         cfg = SessionConfig(fingerprint_seed="42069")
 
         with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
-            mock_browser = AsyncMock()
+            mock_browser = _make_mock_browser()
             mock_launch.return_value = mock_browser
 
             await session.launch(cfg)
@@ -148,7 +156,7 @@ class TestBrowserSession:
         cfg = SessionConfig()
 
         with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
-            mock_browser = AsyncMock()
+            mock_browser = _make_mock_browser()
             mock_launch.return_value = mock_browser
 
             await session.launch(cfg)
@@ -169,7 +177,7 @@ class TestBrowserSession:
         cfg = SessionConfig()
 
         with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
-            mock_browser = AsyncMock()
+            mock_browser = _make_mock_browser()
             mock_page = _make_mock_page()
 
             mock_context = AsyncMock()
@@ -192,7 +200,7 @@ class TestBrowserSession:
         cfg = SessionConfig()
 
         with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
-            mock_browser = AsyncMock()
+            mock_browser = _make_mock_browser()
             mock_page = _make_mock_page()
 
             mock_context = AsyncMock()
@@ -211,7 +219,7 @@ class TestBrowserSession:
     @pytest.mark.asyncio
     async def test_close_page_not_found(self):
         session = BrowserSession()
-        with pytest.raises(KeyError, match="no_such_page"):
+        with pytest.raises(PageNotFoundError):
             await session.close_page("no_such_page")
 
     @pytest.mark.asyncio
@@ -220,7 +228,7 @@ class TestBrowserSession:
         cfg = SessionConfig()
 
         with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
-            mock_browser = AsyncMock()
+            mock_browser = _make_mock_browser()
             mock_page = _make_mock_page()
 
             mock_context = AsyncMock()
@@ -237,8 +245,97 @@ class TestBrowserSession:
     @pytest.mark.asyncio
     async def test_get_page_not_found(self):
         session = BrowserSession()
-        with pytest.raises(KeyError, match="no_such_page"):
+        with pytest.raises(PageNotFoundError):
             session.get_page("no_such_page")
+
+    @pytest.mark.asyncio
+    async def test_get_page_closed(self):
+        """get_page should raise PageClosedError if the page has crashed/closed."""
+        session = BrowserSession()
+        cfg = SessionConfig()
+
+        with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
+            mock_browser = _make_mock_browser()
+            mock_page = _make_mock_page(closed=False)
+
+            mock_context = AsyncMock()
+            mock_context.new_page = AsyncMock(return_value=mock_page)
+            mock_browser.new_context = AsyncMock(return_value=mock_context)
+
+            mock_launch.return_value = mock_browser
+
+            await session.launch(cfg)
+            page_id = await session.new_page()
+
+            # Simulate the page crashing
+            mock_page.is_closed = MagicMock(return_value=True)
+
+            with pytest.raises(PageClosedError):
+                session.get_page(page_id)
+
+            # Page should be cleaned up from tracking
+            assert page_id not in session.pages
+
+    @pytest.mark.asyncio
+    async def test_force_cleanup_on_dead_browser(self):
+        """When browser dies, _check_browser_alive should clean up and raise."""
+        session = BrowserSession()
+        cfg = SessionConfig()
+
+        with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
+            mock_browser = _make_mock_browser(connected=True)
+            mock_page = _make_mock_page()
+
+            mock_context = AsyncMock()
+            mock_context.new_page = AsyncMock(return_value=mock_page)
+            mock_browser.new_context = AsyncMock(return_value=mock_context)
+
+            mock_launch.return_value = mock_browser
+
+            await session.launch(cfg)
+            page_id = await session.new_page()
+
+            # Simulate browser process dying
+            mock_browser.is_connected = MagicMock(return_value=False)
+
+            with pytest.raises(BrowserSessionError, match="died or been disconnected"):
+                session.get_page(page_id)
+
+            # Session should be fully cleaned up
+            assert session._browser is None
+            assert session._context is None
+            assert session.pages == {}
+
+    @pytest.mark.asyncio
+    async def test_launch_after_crash_works(self):
+        """launch_browser should work after a previous browser crash."""
+        session = BrowserSession()
+        cfg = SessionConfig()
+
+        with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
+            # First launch
+            mock_browser1 = _make_mock_browser(connected=True)
+            mock_page = _make_mock_page()
+            mock_context = AsyncMock()
+            mock_context.new_page = AsyncMock(return_value=mock_page)
+            mock_browser1.new_context = AsyncMock(return_value=mock_context)
+            mock_launch.return_value = mock_browser1
+
+            await session.launch(cfg)
+
+            # Simulate crash — browser is dead but session still has reference
+            mock_browser1.is_connected = MagicMock(return_value=False)
+
+            # Second launch should work by cleaning up stale state first
+            mock_browser2 = _make_mock_browser(connected=True)
+            mock_page2 = _make_mock_page()
+            mock_context2 = AsyncMock()
+            mock_context2.new_page = AsyncMock(return_value=mock_page2)
+            mock_browser2.new_context = AsyncMock(return_value=mock_context2)
+            mock_launch.return_value = mock_browser2
+
+            await session.launch(cfg)
+            assert session.is_running is True
 
 
 class TestRefManagement:
@@ -264,7 +361,7 @@ class TestRefManagement:
         cfg = SessionConfig()
 
         with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
-            mock_browser = AsyncMock()
+            mock_browser = _make_mock_browser()
             mock_launch.return_value = mock_browser
 
             await session.launch(cfg)

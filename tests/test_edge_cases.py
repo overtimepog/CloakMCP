@@ -16,7 +16,7 @@ from cloakbrowsermcp.tools import (
     handle_click_ref,
     handle_type_ref,
 )
-from cloakbrowsermcp.session import BrowserSession
+from cloakbrowsermcp.session import BrowserSession, PageNotFoundError, BrowserSessionError
 
 
 def _make_session_with_page():
@@ -43,9 +43,9 @@ class TestNavigateErrors:
     @pytest.mark.asyncio
     async def test_navigate_page_not_found(self):
         session = MagicMock(spec=BrowserSession)
-        session.get_page = MagicMock(side_effect=KeyError("no_page"))
+        session.get_page = MagicMock(side_effect=PageNotFoundError("no_page"))
 
-        with pytest.raises(KeyError):
+        with pytest.raises(PageNotFoundError):
             await handle_navigate(session, {
                 "page_id": "no_page",
                 "url": "https://example.com",
@@ -198,6 +198,37 @@ class TestServerErrorHandling:
         assert "page_xyz" in parsed["error"]
 
     @pytest.mark.asyncio
+    async def test_safe_call_browser_session_error(self):
+        from cloakbrowsermcp.server import _safe_call
+        import json
+
+        async def bad_handler(session, params):
+            raise BrowserSessionError("Browser process has died or been disconnected.")
+
+        result = await _safe_call(bad_handler, None, {})
+        parsed = json.loads(result)
+        assert "error" in parsed
+        assert "died" in parsed["error"]
+
+    @pytest.mark.asyncio
+    async def test_safe_call_closed_browser_error(self):
+        """Test that _safe_call detects browser-closed errors and cleans up."""
+        from cloakbrowsermcp.server import _safe_call
+        import json
+
+        session = MagicMock(spec=BrowserSession)
+        session._force_cleanup = MagicMock()
+
+        async def bad_handler(sess, params):
+            raise Exception("Target page, context or browser has been closed")
+
+        result = await _safe_call(bad_handler, session, {})
+        parsed = json.loads(result)
+        assert "error" in parsed
+        assert "Browser session lost" in parsed["error"]
+        session._force_cleanup.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_safe_call_runtime_error(self):
         from cloakbrowsermcp.server import _safe_call
         import json
@@ -284,6 +315,7 @@ class TestSessionMultiPage:
 
         with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
             mock_browser = AsyncMock()
+            mock_browser.is_connected = MagicMock(return_value=True)
 
             pages_created = []
             async def make_page():
@@ -291,6 +323,7 @@ class TestSessionMultiPage:
                 mock_page.url = "about:blank"
                 mock_page.title = AsyncMock(return_value="")
                 mock_page.on = MagicMock()
+                mock_page.is_closed = MagicMock(return_value=False)
                 pages_created.append(mock_page)
                 return mock_page
 
@@ -320,12 +353,14 @@ class TestSessionMultiPage:
 
         with patch("cloakbrowsermcp.session.launch_async") as mock_launch:
             mock_browser = AsyncMock()
+            mock_browser.is_connected = MagicMock(return_value=True)
 
             async def make_page():
                 mock_page = AsyncMock()
                 mock_page.url = "about:blank"
                 mock_page.title = AsyncMock(return_value="")
                 mock_page.on = MagicMock()
+                mock_page.is_closed = MagicMock(return_value=False)
                 return mock_page
 
             mock_context = AsyncMock()

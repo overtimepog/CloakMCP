@@ -14,7 +14,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from .session import BrowserSession
+from .session import BrowserSession, BrowserSessionError, PageNotFoundError, PageClosedError
 from .tools import (
     handle_launch_browser,
     handle_close_browser,
@@ -76,15 +76,54 @@ def _error(message: str) -> str:
 
 
 async def _safe_call(handler, *args, **kwargs) -> str:
-    """Call a tool handler with error handling, returning JSON."""
+    """Call a tool handler with error handling, returning JSON.
+
+    Catches browser-specific errors and Playwright connection failures,
+    returning agent-friendly error messages with actionable hints.
+    """
     try:
         result = await handler(*args, **kwargs)
         return json.dumps(result)
+    except PageNotFoundError as e:
+        return _error(str(e))
+    except PageClosedError as e:
+        return _error(str(e))
+    except BrowserSessionError as e:
+        return _error(str(e))
     except KeyError as e:
         return _error(f"Page not found: {e}")
     except RuntimeError as e:
         return _error(str(e))
     except Exception as e:
+        err_name = type(e).__name__
+        err_str = str(e).lower()
+
+        # Detect Playwright/browser disconnection errors and clean up
+        if any(keyword in err_str for keyword in (
+            "browser has been closed",
+            "browser closed",
+            "target closed",
+            "connection closed",
+            "target page, context or browser has been closed",
+            "session closed",
+            "closed",
+            "crashed",
+            "disconnected",
+            "not connected",
+        )) or err_name in ("ClosedResourceError", "ConnectionError", "BrokenPipeError"):
+            # Force-cleanup the stale session so launch_browser() works next time
+            if args and isinstance(args[0], BrowserSession):
+                args[0]._force_cleanup()
+            logger.warning(
+                "Browser connection lost in %s: %s — session cleaned up",
+                handler.__name__, e,
+            )
+            return _error(
+                f"Browser session lost ({err_name}). "
+                "The browser process has exited or been disconnected. "
+                "Call launch_browser() to start a new session."
+            )
+
         logger.exception("Tool error in %s", handler.__name__)
         return _error(f"{type(e).__name__}: {e}")
 
@@ -987,7 +1026,10 @@ def create_server() -> FastMCP:
 
 def main():
     """Entry point for the CloakBrowserMCP server."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    # Only set our logger to INFO; keep the MCP library logger at WARNING
+    # to suppress noisy "Processing request of type CallToolRequest" messages.
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    logging.getLogger("cloakbrowsermcp").setLevel(logging.INFO)
     server = create_server()
     server.run()
 
