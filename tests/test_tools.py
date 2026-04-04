@@ -28,6 +28,9 @@ from cloakbrowsermcp.tools import (
     handle_snapshot,
     handle_click_ref,
     handle_type_ref,
+    handle_hover_ref,
+    handle_select_ref,
+    handle_check_ref,
     handle_get_console,
     handle_smart_action,
     handle_get_text,
@@ -66,6 +69,8 @@ class TestLaunchBrowser:
         session.is_running = False
         session.launch = AsyncMock()
         session.new_page = AsyncMock(return_value="page_001")
+        session._browser = None
+        session._context = None
 
         result = await handle_launch_browser(session, {})
 
@@ -78,6 +83,8 @@ class TestLaunchBrowser:
         session.is_running = False
         session.launch = AsyncMock()
         session.new_page = AsyncMock(return_value="page_001")
+        session._browser = None
+        session._context = None
 
         result = await handle_launch_browser(session, {
             "proxy": "http://user:pass@proxy:8080",
@@ -619,12 +626,11 @@ class TestClickRef:
         session, mock_page = _make_session_with_page()
         session.get_refs = MagicMock(return_value={})
 
-        result = await handle_click_ref(session, {
-            "page_id": "page_001",
-            "ref": "@e99",
-        })
-
-        assert "error" in result
+        with pytest.raises(KeyError, match="not found"):
+            await handle_click_ref(session, {
+                "page_id": "page_001",
+                "ref": "@e99",
+            })
 
     @pytest.mark.asyncio
     async def test_click_ref_without_at_prefix(self):
@@ -689,13 +695,33 @@ class TestTypeRef:
         session, mock_page = _make_session_with_page()
         session.get_refs = MagicMock(return_value={})
 
-        result = await handle_type_ref(session, {
-            "page_id": "page_001",
-            "ref": "@e99",
-            "text": "hello",
+        with pytest.raises(KeyError, match="not found"):
+            await handle_type_ref(session, {
+                "page_id": "page_001",
+                "ref": "@e99",
+                "text": "hello",
+            })
+
+    @pytest.mark.asyncio
+    async def test_type_ref_with_submit(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.fill = AsyncMock()
+        mock_page.type = AsyncMock()
+        mock_page.press = AsyncMock()
+        session.get_refs = MagicMock(return_value={
+            "e3": {"selector": "input#search", "tag": "input"}
         })
 
-        assert "error" in result
+        result = await handle_type_ref(session, {
+            "page_id": "page_001",
+            "ref": "@e3",
+            "text": "search query",
+            "submit": True,
+        })
+
+        assert result["status"] == "typed"
+        assert result["submitted"] is True
+        mock_page.press.assert_called_once_with("input#search", "Enter")
 
 
 class TestGetConsole:
@@ -796,3 +822,139 @@ class TestSmartAction:
 
         assert result["status"] == "not_found"
         assert "hint" in result
+
+
+# ---------------------------------------------------------------------------
+# New ref-based tools: hover_ref, select_ref, check_ref
+# ---------------------------------------------------------------------------
+
+class TestHoverRef:
+    """Test hover_ref tool — hover by ref ID from snapshot."""
+
+    @pytest.mark.asyncio
+    async def test_hover_ref_success(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.hover = AsyncMock()
+        session.get_refs = MagicMock(return_value={
+            "e7": {"selector": "nav.menu", "tag": "nav"}
+        })
+
+        result = await handle_hover_ref(session, {
+            "page_id": "page_001",
+            "ref": "@e7",
+        })
+
+        mock_page.hover.assert_called_once_with("nav.menu")
+        assert result["status"] == "hovered"
+        assert result["ref"] == "@e7"
+
+    @pytest.mark.asyncio
+    async def test_hover_ref_not_found(self):
+        session, mock_page = _make_session_with_page()
+        session.get_refs = MagicMock(return_value={})
+
+        with pytest.raises(KeyError, match="not found"):
+            await handle_hover_ref(session, {
+                "page_id": "page_001",
+                "ref": "@e99",
+            })
+
+
+class TestSelectRef:
+    """Test select_ref tool — select dropdown option by ref ID."""
+
+    @pytest.mark.asyncio
+    async def test_select_ref_by_label(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.select_option = AsyncMock(return_value=["us"])
+        session.get_refs = MagicMock(return_value={
+            "e4": {"selector": "select#country", "tag": "select"}
+        })
+
+        result = await handle_select_ref(session, {
+            "page_id": "page_001",
+            "ref": "@e4",
+            "label": "United States",
+        })
+
+        mock_page.select_option.assert_called_once_with("select#country", label="United States")
+        assert result["status"] == "selected"
+
+    @pytest.mark.asyncio
+    async def test_select_ref_by_value(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.select_option = AsyncMock(return_value=["us"])
+        session.get_refs = MagicMock(return_value={
+            "e4": {"selector": "select#country", "tag": "select"}
+        })
+
+        result = await handle_select_ref(session, {
+            "page_id": "page_001",
+            "ref": "@e4",
+            "value": "us",
+        })
+
+        mock_page.select_option.assert_called_once_with("select#country", value="us")
+        assert result["status"] == "selected"
+
+    @pytest.mark.asyncio
+    async def test_select_ref_no_option_provided(self):
+        session, mock_page = _make_session_with_page()
+        session.get_refs = MagicMock(return_value={
+            "e4": {"selector": "select#country", "tag": "select"}
+        })
+
+        result = await handle_select_ref(session, {
+            "page_id": "page_001",
+            "ref": "@e4",
+        })
+
+        assert "error" in result
+
+
+class TestCheckRef:
+    """Test check_ref tool — check/uncheck checkbox by ref ID."""
+
+    @pytest.mark.asyncio
+    async def test_check_ref(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.check = AsyncMock()
+        session.get_refs = MagicMock(return_value={
+            "e8": {"selector": "input#agree", "tag": "input"}
+        })
+
+        result = await handle_check_ref(session, {
+            "page_id": "page_001",
+            "ref": "@e8",
+        })
+
+        mock_page.check.assert_called_once_with("input#agree")
+        assert result["status"] == "checked"
+
+    @pytest.mark.asyncio
+    async def test_uncheck_ref(self):
+        session, mock_page = _make_session_with_page()
+        mock_page.uncheck = AsyncMock()
+        session.get_refs = MagicMock(return_value={
+            "e8": {"selector": "input#agree", "tag": "input"}
+        })
+
+        result = await handle_check_ref(session, {
+            "page_id": "page_001",
+            "ref": "@e8",
+            "checked": False,
+        })
+
+        mock_page.uncheck.assert_called_once_with("input#agree")
+        assert result["status"] == "unchecked"
+
+    @pytest.mark.asyncio
+    async def test_check_ref_not_found(self):
+        session, mock_page = _make_session_with_page()
+        session.get_refs = MagicMock(return_value={})
+
+        with pytest.raises(KeyError, match="not found"):
+            await handle_check_ref(session, {
+                "page_id": "page_001",
+                "ref": "@e99",
+            })

@@ -1,6 +1,6 @@
-"""CloakBrowserMCP — MCP server exposing CloakBrowser stealth browser automation to AI models."""
+"""CloakBrowser MCP v2 — Stealth browser automation for AI agents."""
 
-__version__ = "0.1.0"
+__version__ = "2.0.0"
 
 from .session import BrowserSessionError, PageNotFoundError, PageClosedError
 

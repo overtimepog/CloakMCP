@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cloakbrowsermcp"
-version = "0.1.0"
-description = "MCP server exposing CloakBrowser stealth browser automation to AI models"
+version = "2.0.0"
+description = "Stealth browser MCP server — anti-detection Chromium + snapshot-first AI agent interface"
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [
     { name = "overtimepog" },
@@ -27,16 +27,20 @@ keywords = [
     "recaptcha",
     "cloudflare",
     "turnstile",
+    "accessibility-tree",
+    "snapshot",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Topic :: Software Development :: Testing",
 ]
 dependencies = [
     "mcp>=1.0",

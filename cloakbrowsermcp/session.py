@@ -6,7 +6,9 @@ operations through a single BrowserSession instance.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+import time
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -40,7 +42,7 @@ class SessionConfig:
 
     headless: bool = True
     proxy: str | dict | None = None
-    humanize: bool = False
+    humanize: bool = True
     human_preset: str = "default"
     human_config: dict | None = None
     stealth_args: bool = True
@@ -139,20 +141,61 @@ class BrowserSession:
         """Clear captured console messages for a page."""
         self._console_messages[page_id] = []
 
+    def _append_console_message(self, page_id: str, entry: dict[str, Any]) -> None:
+        """Append a console entry and cap the buffer size for agent-friendly output."""
+        messages = self._console_messages.setdefault(page_id, [])
+        messages.append(entry)
+        if len(messages) > 200:
+            del messages[:-200]
+
+    def _normalize_console_location(self, msg: Any) -> dict[str, Any] | None:
+        """Extract location metadata from a Playwright console message when available."""
+        raw_location = getattr(msg, "location", None)
+        if callable(raw_location):
+            raw_location = raw_location()
+
+        if not raw_location:
+            return None
+
+        if isinstance(raw_location, dict):
+            location = {
+                "url": raw_location.get("url"),
+                "line": raw_location.get("lineNumber"),
+                "column": raw_location.get("columnNumber"),
+            }
+        else:
+            location = {
+                "url": getattr(raw_location, "url", None),
+                "line": getattr(raw_location, "lineNumber", None),
+                "column": getattr(raw_location, "columnNumber", None),
+            }
+
+        if not any(value is not None for value in location.values()):
+            return None
+        return location
+
     def _setup_console_capture(self, page_id: str, page: Any) -> None:
         """Set up console message capture for a page."""
         self._console_messages[page_id] = []
 
         def on_console(msg):
-            self._console_messages.setdefault(page_id, []).append({
-                "type": msg.type,
-                "text": msg.text,
-            })
+            entry: dict[str, Any] = {
+                "type": getattr(msg, "type", "log"),
+                "text": getattr(msg, "text", ""),
+                "timestamp": time.time(),
+                "page_url": getattr(page, "url", ""),
+            }
+            location = self._normalize_console_location(msg)
+            if location:
+                entry["location"] = location
+            self._append_console_message(page_id, entry)
 
         def on_page_error(error):
-            self._console_messages.setdefault(page_id, []).append({
+            self._append_console_message(page_id, {
                 "type": "error",
                 "text": f"[PageError] {error}",
+                "timestamp": time.time(),
+                "page_url": getattr(page, "url", ""),
             })
 
         page.on("console", on_console)
@@ -351,3 +394,61 @@ class BrowserSession:
                 "url": page.url,
             })
         return result
+
+    # -----------------------------------------------------------------------
+    # Page settling (wait for DOM + network stability)
+    # -----------------------------------------------------------------------
+
+    async def settle_page(
+        self,
+        page_id: str,
+        timeout_ms: int = 5000,
+        stable_ms: int = 500,
+    ) -> None:
+        """Wait for a page to become stable (no DOM mutations + network idle).
+
+        Uses a MutationObserver to detect when the DOM stops changing for
+        `stable_ms` milliseconds, combined with Playwright's networkidle.
+        Useful after navigation or interaction before taking a snapshot.
+
+        Args:
+            page_id: The page to settle.
+            timeout_ms: Maximum time to wait in milliseconds (default 5000).
+            stable_ms: Duration of no DOM mutations to consider stable (default 500).
+        """
+        page = self.get_page(page_id)
+
+        # Wait for DOM stability via MutationObserver
+        js_wait_stable = """
+        (stableMs) => new Promise((resolve) => {
+            let timer = null;
+            const observer = new MutationObserver(() => {
+                clearTimeout(timer);
+                timer = setTimeout(() => {
+                    observer.disconnect();
+                    resolve(true);
+                }, stableMs);
+            });
+            observer.observe(document.body || document.documentElement, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                characterData: true,
+            });
+            // Start the timer immediately — if nothing mutates, resolve after stableMs
+            timer = setTimeout(() => {
+                observer.disconnect();
+                resolve(true);
+            }, stableMs);
+        })
+        """
+
+        try:
+            # Run DOM stability check and networkidle concurrently
+            await asyncio.gather(
+                page.evaluate(js_wait_stable, stable_ms),
+                page.wait_for_load_state("networkidle", timeout=timeout_ms),
+            )
+        except Exception as e:
+            # Timeouts are acceptable — page may never fully settle (e.g. live feeds)
+            logger.debug("settle_page(%s) completed with: %s", page_id, e)
