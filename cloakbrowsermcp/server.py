@@ -887,7 +887,7 @@ def main():
         "--transport",
         type=str,
         default="stdio",
-        choices=["stdio", "sse"],
+        choices=["stdio", "sse", "streamable-http"],
         help="MCP transport (default: stdio)",
     )
     parser.add_argument(
@@ -908,6 +908,8 @@ def main():
 
     if args.transport == "sse":
         server.run(transport="sse", port=args.port)
+    elif args.transport == "streamable-http":
+        server.run(transport="streamable-http", port=args.port)
     else:
         server.run(transport="stdio")
 
