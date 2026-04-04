@@ -1,43 +1,35 @@
-# CloakBrowserMCP
+# CloakBrowser MCP
 
-MCP server for [CloakBrowser](https://github.com/CloakHQ/CloakBrowser) — giving AI agents full access to a stealth Chromium that passes every bot detection test.
+**Stealth browser automation for AI agents** — a [Model Context Protocol](https://modelcontextprotocol.io) server combining CloakBrowser's anti-detection with Playwright MCP-inspired architecture.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+CloakBrowser is a source-level patched Chromium that passes Cloudflare Turnstile, reCAPTCHA v3 (0.9 score), FingerprintJS, BrowserScan, and 30+ bot detection services.
 
-## What is this?
+## Why CloakBrowser MCP?
 
-CloakBrowserMCP exposes [CloakBrowser](https://github.com/CloakHQ/CloakBrowser)'s stealth browser automation as an MCP (Model Context Protocol) server. Any AI agent that speaks MCP can launch a source-level patched Chromium, navigate pages, interact with elements, take screenshots, and extract content — all while passing Cloudflare Turnstile, reCAPTCHA v3, FingerprintJS, and 30+ other detection services.
+| Feature | Playwright MCP | CloakBrowser MCP |
+|---------|---------------|-----------------|
+| Anti-detection | ❌ None | ✅ Source-patched Chromium |
+| Cloudflare bypass | ❌ | ✅ |
+| reCAPTCHA v3 | ❌ | ✅ 0.9 score |
+| Snapshot-first | ✅ | ✅ |
+| Markdown extraction | ❌ | ✅ Readability-style |
+| Annotated screenshots | ❌ | ✅ browser-use style |
+| Smart page settling | Basic | ✅ MutationObserver + networkidle |
+| Auto-retry clicks | ❌ | ✅ |
+| Humanized input | ❌ | ✅ Mouse curves, keyboard timing |
+| Capability gating | ✅ --caps | ✅ --caps |
 
-**CloakBrowser** is not a JS injection or config hack — it's a real Chromium binary with 33 C++ source-level patches. This MCP server wraps its full Python API into agent-optimized tools with snapshot-based navigation.
+## Quick Start
 
-## Install
-
-**One-line setup** (clones, installs, downloads the stealth binary, runs tests):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/overtimepog/CloakMCP/main/setup.sh | bash
-```
-
-**pip install:**
+### Install
 
 ```bash
 pip install cloakbrowsermcp
 ```
 
-**From source:**
+### Use with Claude Desktop
 
-```bash
-git clone https://github.com/overtimepog/CloakMCP.git
-cd CloakMCP
-pip install -e ".[dev]"
-```
-
-## Quick Start
-
-### Claude Desktop / Claude Code
-
-Add to your MCP config:
+Add to your `claude_desktop_config.json`:
 
 ```json
 {
@@ -49,229 +41,176 @@ Add to your MCP config:
 }
 ```
 
-### Hermes Agent
+### Use with VS Code / Cursor
+
+Add to `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "cloakbrowser": {
+      "command": "cloakbrowsermcp",
+      "args": ["--caps", "all"]
+    }
+  }
+}
+```
+
+### Use with Hermes Agent
 
 Add to `~/.hermes/config.yaml`:
 
 ```yaml
 mcp_servers:
   cloakbrowser:
-    command: "cloakbrowsermcp"
+    command: cloakbrowsermcp
+    args: ["--caps", "all"]
+    timeout: 120
 ```
 
-Tools will be available as `mcp_cloakbrowser_*` (e.g. `mcp_cloakbrowser_launch_browser`, `mcp_cloakbrowser_snapshot`).
+## How It Works
 
-### Run standalone
+### Snapshot-First Architecture
 
-```bash
-cloakbrowsermcp
-```
-
-## Agent Workflow — Snapshot + Refs
-
-The recommended workflow for AI agents is **snapshot-based navigation**:
+CloakBrowser MCP uses **accessibility tree snapshots** as the primary way for AI models to understand web pages — not screenshots, not raw HTML.
 
 ```
-1. launch_browser()          → get page_id
-2. navigate(page_id, url)    → go to a URL
-3. snapshot(page_id)         → see interactive elements with [@eN] ref IDs
-4. click_ref(page_id, '@e5') → click element by ref ID
-5. type_ref(page_id, '@e3', 'text') → type into input by ref ID
-6. get_text(page_id)         → read page content
-7. close_browser()           → clean up
+1. cloak_launch()           → Start stealth browser
+2. cloak_navigate(pid, url) → Go to page (auto-waits for settle)
+3. cloak_snapshot(pid)      → Get interactive elements with [@eN] refs
+4. cloak_click(pid, '@e5')  → Click element by ref
+5. cloak_type(pid, '@e3', 'hello')  → Type into input
+6. cloak_read_page(pid)     → Get content as clean markdown
+7. cloak_close()            → Done
 ```
 
-The `snapshot()` tool returns an accessibility-tree-like view:
+Each interactive element gets a `[@eN]` ref ID. All interaction tools use these refs — no CSS selectors needed.
 
-```
-Page: Example Login
-URL: https://example.com/login
----
-[@e1] text input "Email" placeholder="you@example.com"
-[@e2] password input "Password"
-[@e3] checkbox "Remember me" [unchecked]
-[@e4] button "Sign In"
-[@e5] link "Forgot password?" -> https://example.com/reset
-```
+### Three Ways to See a Page
 
-Use `click_ref('@e4')` to click Sign In, `type_ref('@e1', 'user@example.com')` to fill email, etc. This is much more reliable than CSS selectors.
+1. **`cloak_snapshot()`** — Accessibility tree with `[@eN]` refs. Fast, cheap, reliable. **Use this.**
+2. **`cloak_read_page()`** — Clean markdown extraction. For reading content, not interacting.
+3. **`cloak_screenshot()`** — Annotated screenshot with element indices. For visual context (images, charts, CAPTCHAs).
+
+### Stealth by Default
+
+All anti-detection features are **ON by default**:
+- Source-patched Chromium binary (not Playwright patches — actual Chromium source modifications)
+- Human-like mouse curves, keyboard timing, and scroll patterns (`humanize=True`)
+- Stealth fingerprint arguments (consistent canvas, WebGL, audio fingerprints)
+- Proxy support with GeoIP-based timezone/locale detection
 
 ## Tools
 
-### Snapshot & Ref-Based Navigation (Recommended)
+### Core Tools (20 — always available)
 
 | Tool | Description |
 |------|-------------|
-| `snapshot` | Get interactive elements with `[@eN]` ref IDs. The primary tool for understanding page structure. `full=True` includes text content. |
-| `click_ref` | Click an element by its `[@eN]` ref from a snapshot. |
-| `type_ref` | Type text into an input by its `[@eN]` ref. Clears field first by default. |
+| `cloak_launch` | Start stealth browser (all anti-detection ON) |
+| `cloak_close` | Close browser and release resources |
+| `cloak_snapshot` | **PRIMARY** — accessibility tree with `[@eN]` refs |
+| `cloak_click` | Click element by ref (auto-retry) |
+| `cloak_type` | Type into input by ref (with submit option) |
+| `cloak_select` | Select dropdown option by ref |
+| `cloak_hover` | Hover over element by ref |
+| `cloak_check` | Check/uncheck checkbox by ref |
+| `cloak_read_page` | Page content as clean markdown |
+| `cloak_screenshot` | Annotated screenshot with element indices |
+| `cloak_navigate` | Go to URL (auto-waits for settle) |
+| `cloak_back` | Navigate back in history |
+| `cloak_forward` | Navigate forward in history |
+| `cloak_press_key` | Press keyboard key |
+| `cloak_scroll` | Scroll page up/down |
+| `cloak_wait` | Wait for page to settle |
+| `cloak_evaluate` | Execute JavaScript in page |
+| `cloak_new_page` | Open new page/tab |
+| `cloak_list_pages` | List all open pages |
+| `cloak_close_page` | Close a specific page |
 
-### Browser Lifecycle
+### Capability-Gated Tools (enabled via `--caps`)
 
-| Tool | Description |
-|------|-------------|
-| `launch_browser` | Launch stealth Chromium with anti-detection. Supports proxy, humanize, persistent profiles, fingerprint seeds, timezone/locale, and custom viewport. |
-| `close_browser` | Close the browser and all pages. |
+Enable with `cloakbrowsermcp --caps network,cookies,pdf,console` or `--caps all`.
 
-### Page Management
+| Tool | Capability | Description |
+|------|-----------|-------------|
+| `cloak_network_intercept` | network | Block/mock/passthrough requests |
+| `cloak_network_continue` | network | Remove interception rule |
+| `cloak_get_cookies` | cookies | Get all cookies |
+| `cloak_set_cookies` | cookies | Set cookies |
+| `cloak_pdf` | pdf | Save page as PDF |
+| `cloak_console` | console | Get browser console output |
 
-| Tool | Description |
-|------|-------------|
-| `new_page` | Open a new tab, optionally navigating to a URL. |
-| `close_page` | Close a specific page by ID. |
-| `list_pages` | List all open pages with IDs and URLs. |
+## Configuration
 
-### Navigation
-
-| Tool | Description |
-|------|-------------|
-| `navigate` | Go to a URL with configurable wait strategy and timeout. |
-| `go_back` | Navigate back in page history. |
-| `go_forward` | Navigate forward in page history. |
-| `reload` | Reload the current page. |
-| `wait_for_navigation` | Wait for a specific load state after an action. |
-
-### Interaction
-
-| Tool | Description |
-|------|-------------|
-| `smart_action` | Click/fill by visible text — 10 matching strategies, no CSS selector needed. |
-| `click` | Click by CSS selector (prefer `click_ref` instead). |
-| `type_text` | Type with per-key events (prefer `type_ref` instead). |
-| `fill_form` | Set a form field value directly. |
-| `hover` | Hover over an element with realistic mouse movement. |
-| `select_option` | Select from a `<select>` dropdown by value, label, or index. |
-| `press_key` | Press keyboard keys (Enter, Tab, Escape, etc). |
-| `scroll` | Scroll with realistic acceleration curves when humanized. |
-
-### Content & Data
-
-| Tool | Description |
-|------|-------------|
-| `get_text` | Get clean readable text from the page (no HTML). Primary content reading tool. |
-| `get_links` | Get all visible links with text and URLs. |
-| `get_form_fields` | Discover all form inputs with types, names, labels, and CSS selectors. |
-| `screenshot` | Capture screenshots — saves PNG to disk, returns file path. |
-| `get_content` | Get raw HTML (prefer `get_text` for agents). |
-| `evaluate` | Run JavaScript in the page context. |
-| `wait_for_selector` | Wait for elements to appear/disappear. |
-| `get_console` | Get browser console output and JS errors. |
-| `get_cookies` / `set_cookies` | Manage browser cookies. |
-| `get_page_info` | Get current URL and title. |
-| `pdf` | Generate a PDF of the page. |
-
-### Advanced
-
-| Tool | Description |
-|------|-------------|
-| `network_intercept` | Block, mock, or log network requests by URL pattern. |
-| `network_continue` | Remove a network interception route. |
-| `set_viewport` | Change viewport size. |
-| `emulate_media` | Emulate color scheme, media type, reduced motion. |
-| `add_init_script` | Inject JS that runs before every page load. |
-| `stealth_config` | Show current stealth configuration. |
-| `binary_info` | Get CloakBrowser binary version and features. |
-
-## Key Features
-
-### Anti-Detection Stealth
-
-Every browser session uses CloakBrowser's source-level patches:
-
-- **33 C++ patches** — canvas, WebGL, audio, fonts, GPU, screen, automation signals
-- **0.9 reCAPTCHA v3 score** — human-level, server-verified
-- **Passes Cloudflare Turnstile**, FingerprintJS, BrowserScan, and 30+ detection services
-- **`navigator.webdriver = false`** at the source level
-
-### Human-Like Behavior
+### CLI Options
 
 ```
-launch_browser(humanize=True)
+cloakbrowsermcp [--caps CAPS] [--transport {stdio,sse}] [--port PORT]
 ```
 
-One flag makes all interactions behave like a real user:
-- Mouse: Bézier curves with easing and slight overshoot
-- Keyboard: per-character timing, thinking pauses, occasional typos
-- Scroll: accelerate → cruise → decelerate micro-steps
+- `--caps`: Comma-separated capabilities: `network`, `cookies`, `pdf`, `console`, `all`
+- `--transport`: MCP transport — `stdio` (default) or `sse`
+- `--port`: Port for SSE transport (default: 8931)
 
-### Persistent Profiles
+### Environment Variables
 
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CLOAKBROWSER_LOG_LEVEL` | `INFO` | Log level |
+| `CLOAKBROWSER_LOG_FILE` | `~/.cloakbrowser/logs/server.log` | Log file path |
+| `CLOAKBROWSER_LOG_STDERR` | `false` | Also log to stderr |
+
+### Launch Options
+
+```python
+cloak_launch(
+    headless=True,        # False for headed mode (some sites require it)
+    proxy="http://...",   # Residential proxy recommended
+    humanize=True,        # Human-like input (ON by default)
+    stealth_args=True,    # Stealth fingerprints (ON by default)
+    timezone="America/New_York",
+    locale="en-US",
+    geoip=False,          # Auto-detect from proxy IP
+    fingerprint_seed="my-identity",  # Consistent fingerprint across sessions
+    user_data_dir="/path",  # Persistent profile
+)
 ```
-launch_browser(user_data_dir="./my-profile")
-```
-
-Cookies, localStorage, and cache persist across sessions. Bypasses incognito detection.
-
-### Fingerprint Pinning
-
-```
-launch_browser(fingerprint_seed="42069")
-```
-
-Same seed = same fingerprint across launches. Look like a returning visitor instead of a new device each time.
-
-### Proxy Support
-
-```
-launch_browser(proxy="http://user:pass@proxy:8080", geoip=True)
-```
-
-Auto-detects timezone and locale from the proxy IP.
 
 ## Architecture
 
 ```
-┌─────────────┐     MCP Protocol      ┌──────────────────┐
-│  AI Agent   │ ◄──────────────────► │  CloakBrowserMCP  │
-│ (Claude,    │    stdio / HTTP       │                  │
-│  Hermes,    │                       │  30 tools        │
-│  GPT, etc)  │                       │  snapshot + refs  │
-└─────────────┘                       │  console capture  │
-                                      └────────┬─────────┘
-                                               │
-                                      ┌────────▼─────────┐
-                                      │   CloakBrowser    │
-                                      │                  │
-                                      │  Patched Chromium │
-                                      │  33 C++ patches   │
-                                      │  Playwright API   │
-                                      └──────────────────┘
+cloakbrowsermcp/
+├── server.py      # FastMCP server, tool registration, error handling
+├── session.py     # Browser lifecycle, page management, ref storage
+├── snapshot.py    # Accessibility tree JS, ref resolution
+├── markdown.py    # Readability-style HTML-to-markdown extraction
+├── vision.py      # Annotated screenshots with element indices
+├── waiting.py     # Smart wait, page settle, retry logic
+├── stealth.py     # Stealth config inspection
+├── network.py     # Network intercept, cookies (capability-gated)
+├── __init__.py
+└── __main__.py
 ```
 
-- **`cloakbrowsermcp/server.py`** — MCP server with all tool registrations (server name: `cloakbrowser`)
-- **`cloakbrowsermcp/session.py`** — Browser lifecycle, page management, ref storage, console capture
-- **`cloakbrowsermcp/tools.py`** — Core tool handlers including snapshot, click_ref, type_ref, console
-- **`cloakbrowsermcp/tools_advanced.py`** — Stealth config, network interception, viewport, media emulation
+### Design Principles
 
-## MCP Naming Convention
-
-When used with MCP clients like Hermes Agent, tools are prefixed with `mcp_{server_name}_`:
-
-- Server name: `cloakbrowser`
-- Tool `snapshot` → `mcp_cloakbrowser_snapshot`
-- Tool `click_ref` → `mcp_cloakbrowser_click_ref`
-- Tool `launch_browser` → `mcp_cloakbrowser_launch_browser`
-
-This avoids name collisions with built-in tools and other MCP servers.
+1. **Snapshot-first** — Tool descriptions steer models to use `cloak_snapshot()` as the primary page understanding tool
+2. **Ref-based only** — No CSS selector tools. All interaction via `[@eN]` refs from snapshots
+3. **Stealth by default** — Anti-detection, humanization, and stealth args all ON without configuration
+4. **Auto-snapshot after actions** — Click, type, navigate all return an updated snapshot
+5. **Smart waiting** — Auto-wait on navigation (networkidle + MutationObserver settle), auto-retry on failed clicks
+6. **Capability gating** — Advanced tools (network, cookies, PDF) off by default to keep tool count low
+7. **Clean content extraction** — Markdown for reading, snapshot for interaction, annotated screenshots for vision
 
 ## Development
 
 ```bash
-git clone https://github.com/overtimepog/CloakMCP.git
+git clone https://github.com/overtimepog/CloakMCP
 cd CloakMCP
 pip install -e ".[dev]"
-
-# Run tests (all mocked — no browser needed)
 pytest
-
-# Run tests with verbose output
-pytest -v
 ```
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
-
-## Credits
-
-Built on [CloakBrowser](https://github.com/CloakHQ/CloakBrowser) by CloakHQ and the [Model Context Protocol](https://modelcontextprotocol.io) Python SDK.
+Apache-2.0

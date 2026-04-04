@@ -187,35 +187,27 @@ class TestServerErrorHandling:
     @pytest.mark.asyncio
     async def test_safe_call_key_error(self):
         from cloakbrowsermcp.server import _safe_call
-        import json
-
         async def bad_handler(session, params):
             raise KeyError("page_xyz")
 
         result = await _safe_call(bad_handler, None, {})
-        parsed = json.loads(result)
-        assert "error" in parsed
-        assert "page_xyz" in parsed["error"]
+        assert "error" in result
+        assert "page_xyz" in result["error"]
 
     @pytest.mark.asyncio
     async def test_safe_call_browser_session_error(self):
         from cloakbrowsermcp.server import _safe_call
-        import json
-
         async def bad_handler(session, params):
             raise BrowserSessionError("Browser process has died or been disconnected.")
 
         result = await _safe_call(bad_handler, None, {})
-        parsed = json.loads(result)
-        assert "error" in parsed
-        assert "died" in parsed["error"]
+        assert "error" in result
+        assert "died" in result["error"]
 
     @pytest.mark.asyncio
     async def test_safe_call_closed_browser_error(self):
         """Test that _safe_call detects browser-closed errors and cleans up."""
         from cloakbrowsermcp.server import _safe_call
-        import json
-
         session = MagicMock(spec=BrowserSession)
         session._force_cleanup = MagicMock()
 
@@ -223,49 +215,39 @@ class TestServerErrorHandling:
             raise Exception("Target page, context or browser has been closed")
 
         result = await _safe_call(bad_handler, session, {})
-        parsed = json.loads(result)
-        assert "error" in parsed
-        assert "Browser session lost" in parsed["error"]
+        assert "error" in result
+        assert "Browser session lost" in result["error"]
         session._force_cleanup.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_safe_call_runtime_error(self):
         from cloakbrowsermcp.server import _safe_call
-        import json
-
         async def bad_handler(session, params):
             raise RuntimeError("Browser is not running. Call launch() first.")
 
         result = await _safe_call(bad_handler, None, {})
-        parsed = json.loads(result)
-        assert "error" in parsed
-        assert "Browser is not running" in parsed["error"]
+        assert "error" in result
+        assert "Browser is not running" in result["error"]
 
     @pytest.mark.asyncio
     async def test_safe_call_generic_exception(self):
         from cloakbrowsermcp.server import _safe_call
-        import json
-
         async def bad_handler(session, params):
             raise ValueError("unexpected value")
 
         result = await _safe_call(bad_handler, None, {})
-        parsed = json.loads(result)
-        assert "error" in parsed
-        assert "ValueError" in parsed["error"]
+        assert "error" in result
+        assert "ValueError" in result["error"]
 
     @pytest.mark.asyncio
     async def test_safe_call_success(self):
         from cloakbrowsermcp.server import _safe_call
-        import json
-
         async def good_handler(session, params):
             return {"status": "ok", "data": 42}
 
         result = await _safe_call(good_handler, None, {})
-        parsed = json.loads(result)
-        assert parsed["status"] == "ok"
-        assert parsed["data"] == 42
+        assert result["status"] == "ok"
+        assert result["data"] == 42
 
 
 class TestSnapshotEdgeCases:

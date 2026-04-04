@@ -24,59 +24,15 @@ class TestToolRegistration:
     """Test all expected tools are registered on the server."""
 
     EXPECTED_TOOLS = [
-        # Browser lifecycle
-        "launch_browser",
-        "close_browser",
-        # Page management
-        "new_page",
-        "close_page",
-        "list_pages",
-        # Snapshot & ref-based navigation
-        "snapshot",
-        "click_ref",
-        "type_ref",
-        # Navigation
-        "navigate",
-        "go_back",
-        "go_forward",
-        "reload",
-        "wait_for_navigation",
-        # Interaction
-        "click",
-        "smart_action",
-        "type_text",
-        "fill_form",
-        "hover",
-        "select_option",
-        "press_key",
-        "scroll",
-        # Content extraction
-        "get_text",
-        "get_links",
-        "get_form_fields",
-        "screenshot",
-        "get_content",
-        "evaluate",
-        "wait_for_selector",
-        # Console
-        "get_console",
-        # Cookies
-        "get_cookies",
-        "set_cookies",
-        # Page info & export
-        "get_page_info",
-        "pdf",
-        # Viewport & media
-        "set_viewport",
-        "emulate_media",
-        # Network interception
-        "network_intercept",
-        "network_continue",
-        # Page scripting
-        "add_init_script",
-        # Stealth inspection
-        "stealth_config",
-        "binary_info",
+        "launch_browser", "close_browser", "new_page", "close_page", "list_pages",
+        "snapshot", "click_ref", "type_ref", "hover_ref", "select_ref", "check_ref",
+        "navigate", "go_back", "go_forward", "reload", "wait_for_navigation",
+        "click", "smart_action", "type_text", "fill_form", "hover", "select_option",
+        "press_key", "scroll",
+        "get_text", "get_links", "get_form_fields", "screenshot", "get_content",
+        "evaluate", "wait_for_selector", "get_console", "get_cookies", "set_cookies",
+        "get_page_info", "pdf", "set_viewport", "emulate_media",
+        "network_intercept", "network_continue", "add_init_script", "stealth_config", "binary_info",
     ]
 
     def test_all_tools_registered(self):

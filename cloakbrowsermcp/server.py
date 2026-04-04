@@ -1,172 +1,325 @@
-"""CloakBrowserMCP Server — MCP server exposing CloakBrowser to AI agents.
+"""CloakBrowser MCP v2 — Stealth browser automation for AI agents.
 
-Registers all tools with the MCP framework and manages the browser session.
-Optimized for AI agent consumption: snapshot-based navigation with ref IDs,
-text-first content, file-based artifacts, structured page inspection,
-and high-level action helpers.
+A clean, focused MCP server that combines CloakBrowser's anti-detection
+with Playwright MCP-inspired architecture: snapshot-first navigation,
+ref-based interaction, clean markdown extraction, and annotated screenshots.
+
+~20 core tools. Stealth by default. No CSS selector tools.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from .session import BrowserSession, BrowserSessionError, PageNotFoundError, PageClosedError
-from .tools import (
-    handle_launch_browser,
-    handle_close_browser,
-    handle_new_page,
-    handle_close_page,
-    handle_list_pages,
-    handle_navigate,
-    handle_click,
-    handle_type_text,
-    handle_fill_form,
-    handle_screenshot,
-    handle_get_content,
-    handle_evaluate,
-    handle_wait_for_selector,
-    handle_hover,
-    handle_select_option,
-    handle_press_key,
-    handle_scroll,
-    handle_get_cookies,
-    handle_set_cookies,
-    handle_get_page_info,
-    handle_pdf,
-    # Agent-friendly handlers
-    handle_get_text,
-    handle_get_links,
-    handle_get_form_fields,
-    handle_smart_action,
-    # New snapshot-based navigation
-    handle_snapshot,
-    handle_click_ref,
-    handle_type_ref,
-    handle_get_console,
+from .session import (
+    BrowserSession,
+    BrowserSessionError,
+    PageNotFoundError,
+    PageClosedError,
+    SessionConfig,
 )
-from .tools_advanced import (
-    handle_stealth_config,
-    handle_get_binary_info,
-    handle_network_intercept,
-    handle_network_continue,
-    handle_wait_for_navigation,
-    handle_go_back,
-    handle_go_forward,
-    handle_reload,
-    handle_set_viewport,
-    handle_emulate_media,
-    handle_add_init_script,
+from .snapshot import take_snapshot, resolve_ref
+from .markdown import extract_markdown
+from .vision import take_annotated_screenshot
+from .waiting import smart_navigate, retry_action, wait_for_settle, detect_loading
+from .stealth import get_stealth_info
+from .network import (
+    setup_intercept,
+    remove_intercept,
+    get_cookies as _get_cookies,
+    set_cookies as _set_cookies,
 )
 
 logger = logging.getLogger("cloakbrowsermcp")
+
+LOGS_DIR = Path.home() / ".cloakbrowser" / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # Global session — shared across all tool calls in a single server instance
 # ---------------------------------------------------------------------------
 _session = BrowserSession()
 
-
-def _error(message: str) -> str:
-    """Return a JSON error string for tool responses."""
-    return json.dumps({"error": message})
+# Capability flags — set via --caps CLI argument
+_capabilities: set[str] = set()
 
 
-async def _safe_call(handler, *args, **kwargs) -> str:
-    """Call a tool handler with error handling, returning JSON.
+def _configure_logging() -> None:
+    """Configure logging without polluting stdio MCP traffic."""
+    if getattr(_configure_logging, "_done", False):
+        return
 
-    Catches browser-specific errors and Playwright connection failures,
-    returning agent-friendly error messages with actionable hints.
-    """
+    log_level = os.getenv("CLOAKBROWSER_LOG_LEVEL", "INFO").upper()
+    log_path = Path(os.getenv("CLOAKBROWSER_LOG_FILE", str(LOGS_DIR / "server.log")))
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    fh = logging.FileHandler(log_path)
+    fh.setFormatter(formatter)
+
+    logger.handlers.clear()
+    logger.setLevel(getattr(logging, log_level, logging.INFO))
+    logger.addHandler(fh)
+    logger.propagate = False
+
+    if os.getenv("CLOAKBROWSER_LOG_STDERR", "").lower() in {"1", "true", "yes"}:
+        sh = logging.StreamHandler(sys.stderr)
+        sh.setFormatter(formatter)
+        logger.addHandler(sh)
+
+    # Silence noisy framework loggers
+    for name in ("mcp", "mcp.server", "mcp.server.lowlevel", "mcp.server.fastmcp", "anyio", "uvicorn"):
+        logging.getLogger(name).setLevel(logging.ERROR)
+
+    _configure_logging._done = True
+
+
+# ---------------------------------------------------------------------------
+# Error handling helpers
+# ---------------------------------------------------------------------------
+
+def _err(msg: str, *, hint: str | None = None) -> dict[str, Any]:
+    """Structured error response."""
+    r: dict[str, Any] = {"status": "error", "error": msg}
+    if hint:
+        r["hint"] = hint
+    return r
+
+
+async def _safe(handler, *args, **kwargs) -> dict[str, Any]:
+    """Call handler with error handling. Returns structured output."""
+    try:
+        return await handler(*args, **kwargs)
+    except (PageNotFoundError, PageClosedError, BrowserSessionError) as e:
+        return _err(str(e))
+    except KeyError as e:
+        return _err(str(e), hint="Call cloak_snapshot() first to get fresh ref IDs.")
+    except Exception as e:
+        err_str = str(e).lower()
+        if any(kw in err_str for kw in ("closed", "crashed", "disconnected", "not connected")):
+            _session._force_cleanup()
+            logger.warning("Browser connection lost: %s", e)
+            return _err(
+                f"Browser session lost. Call cloak_launch() to start a new session.",
+                hint="Call cloak_launch() to restart.",
+            )
+        logger.exception("Tool error: %s", type(e).__name__)
+        return _err(f"{type(e).__name__}: {e}")
+
+
+async def _safe_snap(handler, *args, **kwargs) -> dict[str, Any]:
+    """Call handler, then auto-append a fresh snapshot to the result."""
     try:
         result = await handler(*args, **kwargs)
-        return json.dumps(result)
-    except PageNotFoundError as e:
-        return _error(str(e))
-    except PageClosedError as e:
-        return _error(str(e))
-    except BrowserSessionError as e:
-        return _error(str(e))
+        # Find page_id from args — it's usually in a params dict or direct arg
+        page_id = None
+        for arg in args:
+            if isinstance(arg, dict) and "page_id" in arg:
+                page_id = arg["page_id"]
+                break
+            if isinstance(arg, str) and arg.startswith("page_"):
+                page_id = arg
+                break
+
+        if page_id and not result.get("error"):
+            try:
+                page = _session.get_page(page_id)
+                snap = await take_snapshot(page, page_id, _session, full=False, max_length=6000)
+                result["_snapshot"] = snap.get("snapshot", "")
+                result["_refs"] = snap.get("interactive_elements", 0)
+            except Exception:
+                pass
+
+        return result
+    except (PageNotFoundError, PageClosedError, BrowserSessionError) as e:
+        return _err(str(e))
     except KeyError as e:
-        return _error(f"Page not found: {e}")
-    except RuntimeError as e:
-        return _error(str(e))
+        return _err(str(e), hint="Call cloak_snapshot() first to get fresh ref IDs.")
     except Exception as e:
-        err_name = type(e).__name__
         err_str = str(e).lower()
-
-        # Detect Playwright/browser disconnection errors and clean up
-        if any(keyword in err_str for keyword in (
-            "browser has been closed",
-            "browser closed",
-            "target closed",
-            "connection closed",
-            "target page, context or browser has been closed",
-            "session closed",
-            "closed",
-            "crashed",
-            "disconnected",
-            "not connected",
-        )) or err_name in ("ClosedResourceError", "ConnectionError", "BrokenPipeError"):
-            # Force-cleanup the stale session so launch_browser() works next time
-            if args and isinstance(args[0], BrowserSession):
-                args[0]._force_cleanup()
-            logger.warning(
-                "Browser connection lost in %s: %s — session cleaned up",
-                handler.__name__, e,
-            )
-            return _error(
-                f"Browser session lost ({err_name}). "
-                "The browser process has exited or been disconnected. "
-                "Call launch_browser() to start a new session."
-            )
-
-        logger.exception("Tool error in %s", handler.__name__)
-        return _error(f"{type(e).__name__}: {e}")
+        if any(kw in err_str for kw in ("closed", "crashed", "disconnected", "not connected")):
+            _session._force_cleanup()
+            return _err("Browser session lost. Call cloak_launch() to restart.")
+        logger.exception("Tool error: %s", type(e).__name__)
+        return _err(f"{type(e).__name__}: {e}")
 
 
-def create_server() -> FastMCP:
-    """Create and configure the CloakBrowserMCP server with all tools registered."""
+# ---------------------------------------------------------------------------
+# Tool implementations (thin wrappers calling module functions)
+# ---------------------------------------------------------------------------
+
+async def _do_launch(params: dict) -> dict:
+    """Launch browser with stealth defaults."""
+    if _session.is_running:
+        return {"status": "already_running", "pages": _session.list_pages()}
+
+    if _session._browser is not None or _session._context is not None:
+        _session._force_cleanup()
+
+    cfg = SessionConfig(
+        headless=params.get("headless", True),
+        proxy=params.get("proxy"),
+        humanize=params.get("humanize", True),  # Stealth default: ON
+        human_preset=params.get("human_preset", "default"),
+        stealth_args=params.get("stealth_args", True),
+        timezone=params.get("timezone"),
+        locale=params.get("locale"),
+        geoip=params.get("geoip", False),
+        extra_args=params.get("extra_args", []),
+        fingerprint_seed=params.get("fingerprint_seed"),
+        user_data_dir=params.get("user_data_dir"),
+        viewport={"width": params.get("viewport_width", 1920), "height": params.get("viewport_height", 947)},
+        color_scheme=params.get("color_scheme"),
+        user_agent=params.get("user_agent"),
+    )
+
+    await _session.launch(cfg)
+    page_id = await _session.new_page()
+
+    return {
+        "status": "launched",
+        "page_id": page_id,
+        "stealth": True,
+        "humanize": cfg.humanize,
+        "hint": "Next: call cloak_navigate(page_id, url) to visit a page.",
+    }
+
+
+async def _do_navigate(page_id: str, url: str, timeout: int) -> dict:
+    """Navigate with smart waiting."""
+    page = _session.get_page(page_id)
+    result = await smart_navigate(page, url, timeout=timeout)
+    return {
+        "status": "navigated",
+        "url": result["url"],
+        "title": result["title"],
+        "settled": result.get("settled", False),
+    }
+
+
+async def _do_click(page_id: str, ref: str) -> dict:
+    """Click by ref with auto-retry."""
+    page = _session.get_page(page_id)
+    clean_ref, selector = resolve_ref(_session, page_id, ref)
+
+    async def _click():
+        await page.click(selector, timeout=5000)
+        return {"status": "clicked", "ref": f"@{clean_ref}"}
+
+    return await retry_action(_click, max_retries=1)
+
+
+async def _do_type(page_id: str, ref: str, text: str, clear: bool, submit: bool) -> dict:
+    """Type into element by ref."""
+    page = _session.get_page(page_id)
+    clean_ref, selector = resolve_ref(_session, page_id, ref)
+
+    if clear:
+        await page.fill(selector, "")
+    await page.type(selector, text)
+    if submit:
+        await page.press(selector, "Enter")
+
+    return {"status": "typed", "ref": f"@{clean_ref}", "length": len(text), "submitted": submit}
+
+
+async def _do_select(page_id: str, ref: str, value=None, label=None, index=None) -> dict:
+    """Select dropdown option by ref."""
+    page = _session.get_page(page_id)
+    clean_ref, selector = resolve_ref(_session, page_id, ref)
+
+    kwargs = {}
+    if value is not None:
+        kwargs["value"] = value
+    if label is not None:
+        kwargs["label"] = label
+    if index is not None:
+        kwargs["index"] = index
+
+    if not kwargs:
+        return _err("Provide one of: value, label, or index.")
+
+    selected = await page.select_option(selector, **kwargs)
+    return {"status": "selected", "ref": f"@{clean_ref}", "selected": selected}
+
+
+async def _do_hover(page_id: str, ref: str) -> dict:
+    """Hover over element by ref."""
+    page = _session.get_page(page_id)
+    clean_ref, selector = resolve_ref(_session, page_id, ref)
+    await page.hover(selector)
+    return {"status": "hovered", "ref": f"@{clean_ref}"}
+
+
+async def _do_check(page_id: str, ref: str, checked: bool) -> dict:
+    """Check/uncheck checkbox by ref."""
+    page = _session.get_page(page_id)
+    clean_ref, selector = resolve_ref(_session, page_id, ref)
+
+    if checked:
+        await page.check(selector)
+    else:
+        await page.uncheck(selector)
+
+    return {"status": "checked" if checked else "unchecked", "ref": f"@{clean_ref}"}
+
+
+# ---------------------------------------------------------------------------
+# Server creation
+# ---------------------------------------------------------------------------
+
+def create_server(caps: set[str] | None = None) -> FastMCP:
+    """Create the CloakBrowser MCP server with registered tools."""
+    global _capabilities
+    _capabilities = caps or set()
+
+    _configure_logging()
 
     mcp = FastMCP(
         "cloakbrowser",
+        log_level=os.getenv("CLOAKBROWSER_LOG_LEVEL", "ERROR"),
         instructions=(
-            "Stealth browser automation via CloakBrowser — a source-level patched Chromium "
-            "that passes every bot detection test. Optimized for AI agent workflows.\n\n"
-            "QUICK START:\n"
-            "1. launch_browser() — starts browser, returns a page_id\n"
-            "2. navigate(page_id, url) — go to a URL\n"
-            "3. snapshot(page_id) — get interactive elements with [@eN] ref IDs\n"
-            "4. click_ref(page_id, '@e5') — click element by ref ID from snapshot\n"
-            "5. type_ref(page_id, '@e3', 'hello') — type into input by ref ID\n"
-            "6. get_text(page_id) — read page content as clean text\n\n"
-            "SNAPSHOT WORKFLOW (recommended):\n"
-            "The snapshot() tool returns an accessibility-tree-like view of the page.\n"
-            "Each interactive element gets a ref ID like [@e1], [@e2], etc.\n"
-            "Use click_ref() and type_ref() to interact using these refs.\n"
-            "This is much more reliable than CSS selectors for agent workflows.\n\n"
-            "TIPS:\n"
-            "- Use snapshot() as your primary way to understand page structure\n"
-            "- Use get_text() for reading content, snapshot() for interaction\n"
-            "- Use smart_action() to click buttons/links by their visible text\n"
-            "- Screenshots save to ~/.cloakbrowser/artifacts/ — use vision tools to analyze them\n"
-            "- Use get_console() to check for JavaScript errors\n"
-            "- Always close_browser() when done to free resources"
+            "CloakBrowser — stealth browser automation with anti-detection. "
+            "Source-patched Chromium that passes Cloudflare, reCAPTCHA, FingerprintJS.\n\n"
+            "WORKFLOW:\n"
+            "1. cloak_launch() — start stealth browser (auto-creates first page)\n"
+            "2. cloak_navigate(page_id, url) — go to a URL (auto-waits for page settle)\n"
+            "3. cloak_snapshot(page_id) — get interactive elements with [@eN] ref IDs\n"
+            "4. cloak_click(page_id, '@e5') — click by ref from snapshot\n"
+            "5. cloak_type(page_id, '@e3', 'text') — type by ref from snapshot\n"
+            "6. cloak_read_page(page_id) — get page content as clean markdown\n"
+            "7. cloak_close() — close browser when done\n\n"
+            "IMPORTANT:\n"
+            "- cloak_snapshot() is the PRIMARY way to understand pages. Call it first.\n"
+            "- All interaction uses [@eN] ref IDs from snapshot. No CSS selectors.\n"
+            "- cloak_read_page() returns clean markdown for reading content.\n"
+            "- cloak_screenshot() returns annotated screenshots with element indices.\n"
+            "- Action tools auto-return an updated snapshot."
         ),
     )
 
-    # -----------------------------------------------------------------------
-    # Browser lifecycle
-    # -----------------------------------------------------------------------
+    # ===================================================================
+    # CORE TOOLS (~20)
+    # ===================================================================
+
+    # --- Browser lifecycle ---
 
     @mcp.tool()
-    async def launch_browser(
+    async def cloak_launch(
         headless: bool = True,
         proxy: str | None = None,
-        humanize: bool = False,
+        humanize: bool = True,
         human_preset: str = "default",
         stealth_args: bool = True,
         timezone: str | None = None,
@@ -179,859 +332,584 @@ def create_server() -> FastMCP:
         color_scheme: str | None = None,
         user_agent: str | None = None,
         extra_args: list[str] | None = None,
-    ) -> str:
-        """Launch a stealth CloakBrowser instance with anti-detection.
+    ) -> dict[str, Any]:
+        """Launch a stealth CloakBrowser instance. All anti-detection is ON by default.
 
-        CloakBrowser is a source-level patched Chromium that passes Cloudflare Turnstile,
-        reCAPTCHA v3 (0.9 score), FingerprintJS, BrowserScan, and 30+ detection services.
+        CloakBrowser is a source-patched Chromium passing Cloudflare Turnstile,
+        reCAPTCHA v3 (0.9 score), FingerprintJS, BrowserScan, and 30+ detectors.
 
         Args:
-            headless: Run in headless mode. Some aggressive sites require headed mode.
-            proxy: Proxy URL (e.g. 'http://user:pass@proxy:8080'). Residential proxies recommended.
-            humanize: Enable human-like mouse curves, keyboard timing, scroll patterns.
-            human_preset: 'default' or 'careful' (slower, more deliberate movements).
-            stealth_args: Include default stealth fingerprint args (disable to set custom flags).
-            timezone: IANA timezone (e.g. 'America/New_York') — set via binary flag, not CDP.
+            headless: Run headless. Some aggressive sites need headed mode (False).
+            proxy: Proxy URL (e.g. 'http://user:pass@proxy:8080'). Residential recommended.
+            humanize: Human-like mouse/keyboard/scroll (default: True).
+            human_preset: 'default' or 'careful' (slower, more deliberate).
+            stealth_args: Apply stealth fingerprint args (default: True).
+            timezone: IANA timezone (e.g. 'America/New_York').
             locale: BCP 47 locale (e.g. 'en-US').
             geoip: Auto-detect timezone/locale from proxy IP.
             fingerprint_seed: Fixed seed for consistent identity across sessions.
-            user_data_dir: Path for persistent profile (cookies/localStorage survive restarts).
-            viewport_width: Browser viewport width.
-            viewport_height: Browser viewport height.
-            color_scheme: Color scheme — 'light', 'dark', or 'no-preference'.
-            user_agent: Custom user agent string.
-            extra_args: Additional Chromium CLI arguments.
+            user_data_dir: Persistent profile path (cookies/localStorage survive restarts).
+            viewport_width: Viewport width in pixels.
+            viewport_height: Viewport height in pixels.
+            color_scheme: 'light', 'dark', or 'no-preference'.
+            user_agent: Custom user agent override.
+            extra_args: Additional Chromium CLI flags.
         """
-        params = {
-            "headless": headless,
-            "proxy": proxy,
-            "humanize": humanize,
-            "human_preset": human_preset,
-            "stealth_args": stealth_args,
-            "timezone": timezone,
-            "locale": locale,
-            "geoip": geoip,
-            "fingerprint_seed": fingerprint_seed,
-            "user_data_dir": user_data_dir,
-            "viewport": {"width": viewport_width, "height": viewport_height},
-            "color_scheme": color_scheme,
-            "user_agent": user_agent,
+        return await _safe(_do_launch, {
+            "headless": headless, "proxy": proxy, "humanize": humanize,
+            "human_preset": human_preset, "stealth_args": stealth_args,
+            "timezone": timezone, "locale": locale, "geoip": geoip,
+            "fingerprint_seed": fingerprint_seed, "user_data_dir": user_data_dir,
+            "viewport_width": viewport_width, "viewport_height": viewport_height,
+            "color_scheme": color_scheme, "user_agent": user_agent,
             "extra_args": extra_args or [],
-        }
-        return await _safe_call(handle_launch_browser, _session, params)
+        })
 
     @mcp.tool()
-    async def close_browser() -> str:
-        """Close the stealth browser and all open pages. Always call this when done."""
-        return await _safe_call(handle_close_browser, _session, {})
+    async def cloak_close() -> dict[str, Any]:
+        """Close the stealth browser and release all resources. Always call when done."""
+        if not _session.is_running:
+            return {"status": "not_running"}
+        await _session.close()
+        return {"status": "closed"}
 
-    # -----------------------------------------------------------------------
-    # Page management
-    # -----------------------------------------------------------------------
-
-    @mcp.tool()
-    async def new_page(url: str | None = None) -> str:
-        """Open a new browser page/tab, optionally navigating to a URL.
-
-        Args:
-            url: URL to navigate to after creating the page.
-        """
-        return await _safe_call(handle_new_page, _session, {"url": url} if url else {})
+    # --- Snapshot (PRIMARY page understanding) ---
 
     @mcp.tool()
-    async def close_page(page_id: str) -> str:
-        """Close a specific browser page.
-
-        Args:
-            page_id: The page ID returned by launch_browser or new_page.
-        """
-        return await _safe_call(handle_close_page, _session, {"page_id": page_id})
-
-    @mcp.tool()
-    async def list_pages() -> str:
-        """List all open browser pages with their IDs and URLs."""
-        return await _safe_call(handle_list_pages, _session, {})
-
-    # -----------------------------------------------------------------------
-    # Snapshot — the primary way agents understand page structure
-    # -----------------------------------------------------------------------
-
-    @mcp.tool()
-    async def snapshot(
+    async def cloak_snapshot(
         page_id: str,
         full: bool = False,
         max_length: int = 8000,
-    ) -> str:
-        """Get a text snapshot of the page's interactive elements with ref IDs.
+    ) -> dict[str, Any]:
+        """Capture the page's accessibility tree — the PRIMARY way to understand pages.
 
-        Returns an accessibility-tree-like view where each interactive element
-        (links, buttons, inputs, etc.) gets a [@eN] ref ID. Use these refs with
-        click_ref() and type_ref() to interact with the page.
+        Returns interactive elements with [@eN] ref IDs for use with cloak_click,
+        cloak_type, cloak_select, etc. Call this BEFORE interacting with a page.
 
-        full=False (default): shows only interactive elements — compact and fast.
-        full=True: includes text content too — useful for reading page structure.
+        full=False (default): interactive elements only — compact and fast.
+        full=True: includes surrounding text content for reading context.
 
-        This is the PRIMARY tool for understanding what's on the page and deciding
-        what to click or type. Always call this before interacting with a page.
+        This is FASTER, CHEAPER, and MORE RELIABLE than screenshots.
+        Always prefer this over cloak_screenshot for deciding what to click.
 
         Args:
-            page_id: Target page ID.
-            full: If true, include text content alongside interactive elements.
+            page_id: Target page ID from cloak_launch or cloak_new_page.
+            full: Include text content alongside interactive elements.
             max_length: Max characters to return (default: 8000).
         """
-        return await _safe_call(handle_snapshot, _session, {
-            "page_id": page_id,
-            "full": full,
-            "max_length": max_length,
-        })
+        page = _session.get_page(page_id)
+        return await _safe(take_snapshot, page, page_id, _session, full=full, max_length=max_length)
+
+    # --- Ref-based interaction ---
 
     @mcp.tool()
-    async def click_ref(
-        page_id: str,
-        ref: str,
-    ) -> str:
-        """Click an element by its [@eN] ref ID from a snapshot.
+    async def cloak_click(page_id: str, ref: str) -> dict[str, Any]:
+        """Click an element by its [@eN] ref ID from cloak_snapshot.
 
-        Much more reliable than CSS selectors. Call snapshot() first to get ref IDs,
-        then click_ref(page_id, '@e5') to click the element.
+        Auto-retries once if the element moved. Returns an updated snapshot.
 
         Args:
             page_id: Target page ID.
-            ref: The ref ID from the snapshot (e.g. '@e5' or 'e5').
+            ref: Ref ID from snapshot (e.g. '@e5' or 'e5').
         """
-        return await _safe_call(handle_click_ref, _session, {
-            "page_id": page_id,
-            "ref": ref,
-        })
+        return await _safe_snap(_do_click, page_id, ref)
 
     @mcp.tool()
-    async def type_ref(
+    async def cloak_type(
         page_id: str,
         ref: str,
         text: str,
         clear: bool = True,
-        delay: int = 0,
-    ) -> str:
-        """Type text into an input element by its [@eN] ref ID from a snapshot.
+        submit: bool = False,
+    ) -> dict[str, Any]:
+        """Type text into an input by its [@eN] ref ID from cloak_snapshot.
 
-        Call snapshot() first to find input fields and their ref IDs.
-        Clears the field first by default, then types the text with per-key events.
+        Clears the field first by default. Set submit=True to press Enter after.
+        Returns an updated snapshot.
 
         Args:
             page_id: Target page ID.
-            ref: The ref ID from the snapshot (e.g. '@e3' or 'e3').
-            text: The text to type.
-            clear: Clear the field before typing (default: True).
-            delay: Delay between keystrokes in ms (0=instant, 50-100=realistic).
+            ref: Ref ID from snapshot (e.g. '@e3' or 'e3').
+            text: Text to type.
+            clear: Clear field before typing (default: True).
+            submit: Press Enter after typing (default: False).
         """
-        return await _safe_call(handle_type_ref, _session, {
-            "page_id": page_id,
-            "ref": ref,
-            "text": text,
-            "clear": clear,
-            "delay": delay,
-        })
-
-    # -----------------------------------------------------------------------
-    # Navigation
-    # -----------------------------------------------------------------------
+        return await _safe_snap(_do_type, page_id, ref, text, clear, submit)
 
     @mcp.tool()
-    async def navigate(
+    async def cloak_select(
+        page_id: str,
+        ref: str,
+        value: str | None = None,
+        label: str | None = None,
+        index: int | None = None,
+    ) -> dict[str, Any]:
+        """Select a dropdown option by ref ID. Provide one of: value, label, or index.
+
+        Returns an updated snapshot.
+
+        Args:
+            page_id: Target page ID.
+            ref: Ref ID of the <select> element.
+            value: Option value attribute to select.
+            label: Option visible text to select.
+            index: Option index (0-based) to select.
+        """
+        return await _safe_snap(_do_select, page_id, ref, value, label, index)
+
+    @mcp.tool()
+    async def cloak_hover(page_id: str, ref: str) -> dict[str, Any]:
+        """Hover over an element by ref ID. Returns an updated snapshot.
+
+        Args:
+            page_id: Target page ID.
+            ref: Ref ID from snapshot.
+        """
+        return await _safe_snap(_do_hover, page_id, ref)
+
+    @mcp.tool()
+    async def cloak_check(page_id: str, ref: str, checked: bool = True) -> dict[str, Any]:
+        """Check or uncheck a checkbox/radio by ref ID. Returns an updated snapshot.
+
+        Args:
+            page_id: Target page ID.
+            ref: Ref ID from snapshot.
+            checked: True to check, False to uncheck.
+        """
+        return await _safe_snap(_do_check, page_id, ref, checked)
+
+    # --- Content extraction ---
+
+    @mcp.tool()
+    async def cloak_read_page(
+        page_id: str,
+        max_length: int = 50000,
+    ) -> dict[str, Any]:
+        """Get the page content as clean, readable markdown.
+
+        Best for reading articles, docs, search results, or any content-heavy page.
+        Strips navigation, ads, footers — returns just the main content.
+        Much more token-efficient than raw HTML (60-80% savings).
+
+        Args:
+            page_id: Target page ID.
+            max_length: Max characters to return (default: 50000).
+        """
+        page = _session.get_page(page_id)
+        return await _safe(extract_markdown, page, max_length=max_length)
+
+    @mcp.tool()
+    async def cloak_screenshot(
+        page_id: str,
+        full_page: bool = False,
+    ) -> dict[str, Any]:
+        """Take an annotated screenshot with element indices overlaid.
+
+        Each numbered element maps to [@eN] refs from cloak_snapshot.
+        Use when you need VISUAL context — images, charts, CAPTCHAs, or layout.
+        For most interactions, prefer cloak_snapshot() instead.
+
+        Returns: file path to saved PNG, element count.
+
+        Args:
+            page_id: Target page ID.
+            full_page: Capture entire scrollable page (default: viewport only).
+        """
+        page = _session.get_page(page_id)
+        return await _safe(take_annotated_screenshot, page, page_id, _session, full_page=full_page)
+
+    # --- Navigation ---
+
+    @mcp.tool()
+    async def cloak_navigate(
         page_id: str,
         url: str,
-        wait_until: str = "domcontentloaded",
         timeout: int = 30000,
-    ) -> str:
-        """Navigate a page to a URL.
+    ) -> dict[str, Any]:
+        """Navigate to a URL. Auto-waits for the page to settle (network idle + DOM stable).
+
+        Handles Cloudflare challenge pages with extra wait time.
+        Returns an updated snapshot of the loaded page.
 
         Args:
             page_id: Target page ID.
             url: URL to navigate to.
-            wait_until: When to consider navigation done — 'domcontentloaded', 'load', 'networkidle'.
             timeout: Navigation timeout in milliseconds.
         """
-        return await _safe_call(handle_navigate, _session, {
-            "page_id": page_id,
-            "url": url,
-            "wait_until": wait_until,
-            "timeout": timeout,
-        })
+        return await _safe_snap(_do_navigate, page_id, url, timeout)
 
     @mcp.tool()
-    async def go_back(page_id: str) -> str:
-        """Navigate back in page history.
+    async def cloak_back(page_id: str) -> dict[str, Any]:
+        """Navigate back in browser history. Returns an updated snapshot.
 
         Args:
             page_id: Target page ID.
         """
-        return await _safe_call(handle_go_back, _session, {"page_id": page_id})
+        async def _go_back(pid):
+            page = _session.get_page(pid)
+            await page.go_back()
+            await wait_for_settle(page)
+            title = await page.title()
+            return {"url": page.url, "title": title}
+
+        return await _safe_snap(_go_back, page_id)
 
     @mcp.tool()
-    async def go_forward(page_id: str) -> str:
-        """Navigate forward in page history.
+    async def cloak_forward(page_id: str) -> dict[str, Any]:
+        """Navigate forward in browser history. Returns an updated snapshot.
 
         Args:
             page_id: Target page ID.
         """
-        return await _safe_call(handle_go_forward, _session, {"page_id": page_id})
+        async def _go_fwd(pid):
+            page = _session.get_page(pid)
+            await page.go_forward()
+            await wait_for_settle(page)
+            title = await page.title()
+            return {"url": page.url, "title": title}
+
+        return await _safe_snap(_go_fwd, page_id)
+
+    # --- Keyboard & scroll ---
 
     @mcp.tool()
-    async def reload(page_id: str) -> str:
-        """Reload the current page.
-
-        Args:
-            page_id: Target page ID.
-        """
-        return await _safe_call(handle_reload, _session, {"page_id": page_id})
-
-    @mcp.tool()
-    async def wait_for_navigation(
-        page_id: str,
-        state: str = "domcontentloaded",
-        timeout: int = 30000,
-    ) -> str:
-        """Wait for the page to reach a specific load state after a click or action.
-
-        Args:
-            page_id: Target page ID.
-            state: Load state — 'domcontentloaded', 'load', 'networkidle'.
-            timeout: Max wait time in milliseconds.
-        """
-        return await _safe_call(handle_wait_for_navigation, _session, {
-            "page_id": page_id,
-            "state": state,
-            "timeout": timeout,
-        })
-
-    # -----------------------------------------------------------------------
-    # Interaction (CSS selector-based — prefer snapshot refs instead)
-    # -----------------------------------------------------------------------
-
-    @mcp.tool()
-    async def click(
-        page_id: str,
-        selector: str,
-        timeout: int = 5000,
-    ) -> str:
-        """Click an element using a CSS selector. Prefer click_ref() with snapshot refs instead.
-
-        Args:
-            page_id: Target page ID.
-            selector: CSS selector of the element to click.
-            timeout: Max time to wait for the element in ms.
-        """
-        return await _safe_call(handle_click, _session, {
-            "page_id": page_id,
-            "selector": selector,
-            "timeout": timeout,
-        })
-
-    @mcp.tool()
-    async def smart_action(
-        page_id: str,
-        text: str,
-        action: str = "click",
-        value: str = "",
-    ) -> str:
-        """Click a link or button by its visible text — no CSS selector needed.
-
-        Tries multiple strategies (exact text, partial text, ARIA roles, labels,
-        placeholders, titles) to find the element. Falls back gracefully with hints.
-
-        Args:
-            page_id: Target page ID.
-            text: Visible text of the element (e.g. 'Sign In', 'Submit', 'Next').
-            action: What to do — 'click', 'fill', or 'type'.
-            value: Value to fill/type (only used with action='fill' or 'type').
-        """
-        return await _safe_call(handle_smart_action, _session, {
-            "page_id": page_id,
-            "text": text,
-            "action": action,
-            "value": value,
-        })
-
-    @mcp.tool()
-    async def type_text(
-        page_id: str,
-        selector: str,
-        text: str,
-        delay: int = 0,
-    ) -> str:
-        """Type text into an element with per-key events. Prefer type_ref() with snapshot refs.
-
-        Better for reCAPTCHA sites than fill_form() because it fires keyboard events.
-
-        Args:
-            page_id: Target page ID.
-            selector: CSS selector of the input element.
-            text: Text to type.
-            delay: Delay between keystrokes in ms (0 for instant, 50-100 for realistic).
-        """
-        return await _safe_call(handle_type_text, _session, {
-            "page_id": page_id,
-            "selector": selector,
-            "text": text,
-            "delay": delay,
-        })
-
-    @mcp.tool()
-    async def fill_form(
-        page_id: str,
-        selector: str,
-        value: str,
-    ) -> str:
-        """Fill a form field directly (sets value without key events).
-
-        Note: For sites with reCAPTCHA, prefer type_text() or type_ref() which fire keyboard events.
-
-        Args:
-            page_id: Target page ID.
-            selector: CSS selector of the input element.
-            value: Value to fill.
-        """
-        return await _safe_call(handle_fill_form, _session, {
-            "page_id": page_id,
-            "selector": selector,
-            "value": value,
-        })
-
-    @mcp.tool()
-    async def hover(page_id: str, selector: str) -> str:
-        """Hover over an element. With humanize=True, uses realistic mouse curves.
-
-        Args:
-            page_id: Target page ID.
-            selector: CSS selector of the element to hover.
-        """
-        return await _safe_call(handle_hover, _session, {
-            "page_id": page_id,
-            "selector": selector,
-        })
-
-    @mcp.tool()
-    async def select_option(
-        page_id: str,
-        selector: str,
-        value: str | None = None,
-        label: str | None = None,
-        index: int | None = None,
-    ) -> str:
-        """Select an option from a <select> dropdown.
-
-        Args:
-            page_id: Target page ID.
-            selector: CSS selector of the <select> element.
-            value: Option value to select.
-            label: Option visible text to select.
-            index: Option index to select (0-based).
-        """
-        params: dict[str, Any] = {"page_id": page_id, "selector": selector}
-        if value is not None:
-            params["value"] = value
-        if label is not None:
-            params["label"] = label
-        if index is not None:
-            params["index"] = index
-
-        return await _safe_call(handle_select_option, _session, params)
-
-    @mcp.tool()
-    async def press_key(
+    async def cloak_press_key(
         page_id: str,
         key: str,
-        selector: str | None = None,
-    ) -> str:
-        """Press a keyboard key (e.g. Enter, Tab, Escape, ArrowDown).
+    ) -> dict[str, Any]:
+        """Press a keyboard key (Enter, Tab, Escape, ArrowDown, etc.).
+
+        Returns an updated snapshot.
 
         Args:
             page_id: Target page ID.
-            key: Key to press (DOM KeyboardEvent key name).
-            selector: Optional element to focus before pressing.
+            key: Key name (DOM KeyboardEvent key).
         """
-        params: dict[str, Any] = {"page_id": page_id, "key": key}
-        if selector:
-            params["selector"] = selector
+        async def _press(pid, k):
+            page = _session.get_page(pid)
+            await page.keyboard.press(k)
+            return {"status": "pressed", "key": k}
 
-        return await _safe_call(handle_press_key, _session, params)
+        return await _safe_snap(_press, page_id, key)
 
     @mcp.tool()
-    async def scroll(
+    async def cloak_scroll(
         page_id: str,
         direction: str = "down",
-        amount: int = 300,
-    ) -> str:
-        """Scroll the page. With humanize=True, uses realistic acceleration curves.
+        amount: int = 500,
+    ) -> dict[str, Any]:
+        """Scroll the page. Returns an updated snapshot.
 
         Args:
             page_id: Target page ID.
             direction: 'up' or 'down'.
             amount: Pixels to scroll.
         """
-        return await _safe_call(handle_scroll, _session, {
-            "page_id": page_id,
-            "direction": direction,
-            "amount": amount,
-        })
+        async def _scroll(pid, d, a):
+            page = _session.get_page(pid)
+            delta = a if d == "down" else -a
+            await page.evaluate(f"window.scrollBy(0, {delta})")
+            return {"status": "scrolled", "direction": d, "amount": a}
 
-    # -----------------------------------------------------------------------
-    # Content extraction (agent-optimized)
-    # -----------------------------------------------------------------------
+        return await _safe_snap(_scroll, page_id, direction, amount)
+
+    # --- Wait ---
 
     @mcp.tool()
-    async def get_text(
+    async def cloak_wait(
         page_id: str,
-        selector: str = "body",
-        max_length: int = 50000,
-    ) -> str:
-        """Get readable text content from the page — clean, no HTML tags.
+        timeout_ms: int = 5000,
+    ) -> dict[str, Any]:
+        """Wait for the page to settle (no DOM mutations + network idle).
 
-        This is the PRIMARY way to read page content. Returns visible text only,
-        with whitespace cleaned up. Much better than get_content() for agents.
+        Use after actions that trigger dynamic content loading.
+        Returns whether the page settled and how many DOM mutations occurred.
 
         Args:
             page_id: Target page ID.
-            selector: CSS selector to extract text from (default: 'body' = whole page).
-            max_length: Max characters to return (default: 50000). Truncates with notice.
+            timeout_ms: Max wait time in milliseconds (default: 5000).
         """
-        return await _safe_call(handle_get_text, _session, {
-            "page_id": page_id,
-            "selector": selector,
-            "max_length": max_length,
-        })
+        page = _session.get_page(page_id)
+        return await _safe(wait_for_settle, page, timeout_ms=timeout_ms)
+
+    # --- JavaScript ---
 
     @mcp.tool()
-    async def get_links(
-        page_id: str,
-        selector: str = "body",
-    ) -> str:
-        """Get all visible links from the page with their text and URLs.
-
-        Returns a structured list of links the agent can use for navigation decisions.
-
-        Args:
-            page_id: Target page ID.
-            selector: CSS selector to scope the search (default: entire page).
-        """
-        return await _safe_call(handle_get_links, _session, {
-            "page_id": page_id,
-            "selector": selector,
-        })
-
-    @mcp.tool()
-    async def get_form_fields(
-        page_id: str,
-        selector: str = "body",
-    ) -> str:
-        """Discover all form inputs on the page — types, names, labels, selectors.
-
-        Returns structured data about every visible input, textarea, select, and submit
-        button. Each field includes a ready-to-use CSS selector for fill_form()/type_text().
-
-        Args:
-            page_id: Target page ID.
-            selector: CSS selector to scope the search (default: entire page).
-        """
-        return await _safe_call(handle_get_form_fields, _session, {
-            "page_id": page_id,
-            "selector": selector,
-        })
-
-    @mcp.tool()
-    async def screenshot(
-        page_id: str,
-        full_page: bool = False,
-        selector: str | None = None,
-    ) -> str:
-        """Take a screenshot — saves PNG to disk and returns the file path.
-
-        Use vision/image analysis tools on the returned path to understand visual content.
-
-        Args:
-            page_id: Target page ID.
-            full_page: Capture the entire scrollable page.
-            selector: CSS selector to screenshot a specific element.
-        """
-        return await _safe_call(handle_screenshot, _session, {
-            "page_id": page_id,
-            "full_page": full_page,
-            "selector": selector,
-        })
-
-    @mcp.tool()
-    async def get_content(
-        page_id: str,
-        selector: str | None = None,
-        content_type: str = "html",
-    ) -> str:
-        """Get raw page content — HTML, text of a selector, or outer HTML.
-
-        NOTE: Prefer get_text() for readable content. This returns raw HTML which
-        can be very large. Use this only when you need actual HTML structure.
-
-        Args:
-            page_id: Target page ID.
-            selector: CSS selector to extract content from. None = full page.
-            content_type: 'html' (full page or inner HTML), 'text' (visible text), 'outer_html'.
-        """
-        return await _safe_call(handle_get_content, _session, {
-            "page_id": page_id,
-            "selector": selector,
-            "content_type": content_type,
-        })
-
-    @mcp.tool()
-    async def evaluate(page_id: str, expression: str) -> str:
+    async def cloak_evaluate(page_id: str, expression: str) -> dict[str, Any]:
         """Execute JavaScript in the page context and return the result.
 
         Args:
             page_id: Target page ID.
             expression: JavaScript expression to evaluate.
         """
-        return await _safe_call(handle_evaluate, _session, {
-            "page_id": page_id,
-            "expression": expression,
-        })
+        async def _eval(pid, expr):
+            page = _session.get_page(pid)
+            result = await page.evaluate(expr)
+            # Ensure JSON-serializable
+            try:
+                json.dumps(result)
+            except (TypeError, ValueError):
+                result = str(result)
+            if isinstance(result, str) and len(result) > 500_000:
+                result = result[:500_000] + "\n[... truncated]"
+            return {"result": result}
+
+        return await _safe(_eval, page_id, expression)
+
+    # --- Page management ---
 
     @mcp.tool()
-    async def wait_for_selector(
-        page_id: str,
-        selector: str,
-        state: str = "visible",
-        timeout: int = 30000,
-    ) -> str:
-        """Wait for an element to reach a state (visible, hidden, attached, detached).
+    async def cloak_new_page(url: str | None = None) -> dict[str, Any]:
+        """Open a new browser page/tab. Optionally navigate to a URL.
 
         Args:
-            page_id: Target page ID.
-            selector: CSS selector to wait for.
-            state: Target state — 'visible', 'hidden', 'attached', 'detached'.
-            timeout: Max wait time in milliseconds.
+            url: URL to navigate to after creating the page.
         """
-        return await _safe_call(handle_wait_for_selector, _session, {
-            "page_id": page_id,
-            "selector": selector,
-            "state": state,
-            "timeout": timeout,
-        })
+        async def _new(u):
+            pid = await _session.new_page()
+            page = _session.get_page(pid)
+            if u:
+                await smart_navigate(page, u)
+            return {"page_id": pid, "url": page.url}
 
-    # -----------------------------------------------------------------------
-    # Console output
-    # -----------------------------------------------------------------------
+        return await _safe(_new, url)
 
     @mcp.tool()
-    async def get_console(
-        page_id: str,
-        clear: bool = False,
-    ) -> str:
-        """Get browser console output and JavaScript errors from the page.
+    async def cloak_list_pages() -> dict[str, Any]:
+        """List all open pages with their IDs and URLs."""
+        return {"pages": _session.list_pages()}
 
-        Returns console.log/warn/error/info messages and uncaught JS exceptions.
-        Useful for detecting silent JavaScript errors, failed API calls, and application warnings.
+    @mcp.tool()
+    async def cloak_close_page(page_id: str) -> dict[str, Any]:
+        """Close a specific page by ID.
 
         Args:
-            page_id: Target page ID.
-            clear: If true, clear the message buffer after reading.
+            page_id: Page ID to close.
         """
-        return await _safe_call(handle_get_console, _session, {
-            "page_id": page_id,
-            "clear": clear,
-        })
+        async def _close(pid):
+            await _session.close_page(pid)
+            return {"status": "closed", "page_id": pid}
 
-    # -----------------------------------------------------------------------
-    # Cookies
-    # -----------------------------------------------------------------------
+        return await _safe(_close, page_id)
 
-    @mcp.tool()
-    async def get_cookies(page_id: str) -> str:
-        """Get all cookies from the page's browser context.
+    # ===================================================================
+    # CAPABILITY-GATED TOOLS (enabled via --caps flag)
+    # ===================================================================
 
-        Args:
-            page_id: Target page ID.
-        """
-        return await _safe_call(handle_get_cookies, _session, {"page_id": page_id})
+    if "network" in _capabilities or "all" in _capabilities:
 
-    @mcp.tool()
-    async def set_cookies(page_id: str, cookies: list[dict]) -> str:
-        """Set cookies in the page's browser context.
+        @mcp.tool()
+        async def cloak_network_intercept(
+            page_id: str,
+            url_pattern: str,
+            action: str = "block",
+            mock_body: str = "",
+            mock_status: int = 200,
+            mock_content_type: str = "application/json",
+        ) -> dict[str, Any]:
+            """Intercept network requests — block, mock, or passthrough.
 
-        Args:
-            page_id: Target page ID.
-            cookies: List of cookie dicts with name, value, domain, path fields.
-        """
-        return await _safe_call(handle_set_cookies, _session, {
-            "page_id": page_id,
-            "cookies": cookies,
-        })
+            Args:
+                page_id: Target page ID.
+                url_pattern: Glob pattern (e.g. '**/api/**', '**/*.png').
+                action: 'block', 'mock', or 'continue'.
+                mock_body: Response body for 'mock' action.
+                mock_status: HTTP status for 'mock' action.
+                mock_content_type: Content-Type for 'mock' action.
+            """
+            page = _session.get_page(page_id)
+            return await _safe(
+                setup_intercept, page, page_id, url_pattern,
+                action=action, mock_body=mock_body,
+                mock_status=mock_status, mock_content_type=mock_content_type,
+            )
 
-    # -----------------------------------------------------------------------
-    # Page info & export
-    # -----------------------------------------------------------------------
+        @mcp.tool()
+        async def cloak_network_continue(page_id: str, url_pattern: str) -> dict[str, Any]:
+            """Remove a network interception rule.
 
-    @mcp.tool()
-    async def get_page_info(page_id: str) -> str:
-        """Get current page URL and title.
+            Args:
+                page_id: Target page ID.
+                url_pattern: Same pattern used in cloak_network_intercept.
+            """
+            page = _session.get_page(page_id)
+            return await _safe(remove_intercept, page, page_id, url_pattern)
 
-        Args:
-            page_id: Target page ID.
-        """
-        return await _safe_call(handle_get_page_info, _session, {"page_id": page_id})
+    if "cookies" in _capabilities or "all" in _capabilities:
 
-    @mcp.tool()
-    async def pdf(
-        page_id: str,
-        format: str = "A4",
-        print_background: bool = True,
-    ) -> str:
-        """Generate a PDF of the current page — saves to disk and returns file path.
+        @mcp.tool()
+        async def cloak_get_cookies(page_id: str) -> dict[str, Any]:
+            """Get all cookies from the page's browser context.
 
-        Args:
-            page_id: Target page ID.
-            format: Page format — 'A4', 'Letter', 'Legal'.
-            print_background: Include background graphics.
-        """
-        return await _safe_call(handle_pdf, _session, {
-            "page_id": page_id,
-            "format": format,
-            "print_background": print_background,
-        })
+            Args:
+                page_id: Target page ID.
+            """
+            page = _session.get_page(page_id)
+            return await _safe(_get_cookies, page)
 
-    # -----------------------------------------------------------------------
-    # Viewport & media
-    # -----------------------------------------------------------------------
+        @mcp.tool()
+        async def cloak_set_cookies(page_id: str, cookies: list[dict]) -> dict[str, Any]:
+            """Set cookies in the page's browser context.
 
-    @mcp.tool()
-    async def set_viewport(
-        page_id: str,
-        width: int,
-        height: int,
-    ) -> str:
-        """Set the viewport size of a page.
+            Args:
+                page_id: Target page ID.
+                cookies: List of cookie dicts with name, value, domain, path.
+            """
+            page = _session.get_page(page_id)
+            return await _safe(_set_cookies, page, cookies)
 
-        Args:
-            page_id: Target page ID.
-            width: Viewport width in pixels.
-            height: Viewport height in pixels.
-        """
-        return await _safe_call(handle_set_viewport, _session, {
-            "page_id": page_id,
-            "width": width,
-            "height": height,
-        })
+    if "pdf" in _capabilities or "all" in _capabilities:
 
-    @mcp.tool()
-    async def emulate_media(
-        page_id: str,
-        color_scheme: str | None = None,
-        media: str | None = None,
-        reduced_motion: str | None = None,
-    ) -> str:
-        """Emulate media features (color scheme, media type, etc.).
+        @mcp.tool()
+        async def cloak_pdf(
+            page_id: str,
+            format: str = "A4",
+            print_background: bool = True,
+        ) -> dict[str, Any]:
+            """Save the current page as a PDF file.
 
-        Args:
-            page_id: Target page ID.
-            color_scheme: 'light', 'dark', or 'no-preference'.
-            media: 'screen' or 'print'.
-            reduced_motion: 'reduce' or 'no-preference'.
-        """
-        params: dict[str, Any] = {"page_id": page_id}
-        if color_scheme is not None:
-            params["color_scheme"] = color_scheme
-        if media is not None:
-            params["media"] = media
-        if reduced_motion is not None:
-            params["reduced_motion"] = reduced_motion
-        return await _safe_call(handle_emulate_media, _session, params)
+            Args:
+                page_id: Target page ID.
+                format: Page format — 'A4', 'Letter', 'Legal'.
+                print_background: Include background graphics.
+            """
+            from pathlib import Path
+            import time
 
-    # -----------------------------------------------------------------------
-    # Network interception
-    # -----------------------------------------------------------------------
+            async def _pdf(pid, fmt, bg):
+                page = _session.get_page(pid)
+                ts = int(time.time() * 1000)
+                fp = Path.home() / ".cloakbrowser" / "artifacts" / f"page_{ts}.pdf"
+                fp.parent.mkdir(parents=True, exist_ok=True)
+                pdf_bytes = await page.pdf(format=fmt, print_background=bg)
+                fp.write_bytes(pdf_bytes)
+                return {"path": str(fp), "size_bytes": len(pdf_bytes)}
 
-    @mcp.tool()
-    async def network_intercept(
-        page_id: str,
-        url_pattern: str,
-        action: str = "block",
-        mock_body: str = "",
-        mock_status: int = 200,
-        mock_content_type: str = "application/json",
-    ) -> str:
-        """Set up network request interception — block, mock, or log requests.
+            return await _safe(_pdf, page_id, format, print_background)
 
-        Useful for blocking ads/trackers, mocking API responses, or testing.
+    if "console" in _capabilities or "all" in _capabilities:
 
-        Args:
-            page_id: Target page ID.
-            url_pattern: URL pattern to intercept (glob, e.g. '**/api/**' or '**/*.png').
-            action: 'block' (abort request), 'mock' (return fake response), 'continue' (passthrough).
-            mock_body: Response body when action='mock'.
-            mock_status: HTTP status code when action='mock'.
-            mock_content_type: Content-Type header when action='mock'.
-        """
-        return await _safe_call(handle_network_intercept, _session, {
-            "page_id": page_id,
-            "url_pattern": url_pattern,
-            "action": action,
-            "mock_body": mock_body,
-            "mock_status": mock_status,
-            "mock_content_type": mock_content_type,
-        })
+        @mcp.tool()
+        async def cloak_console(page_id: str, clear: bool = False) -> dict[str, Any]:
+            """Get browser console output (log/warn/error/info) and JS errors.
 
-    @mcp.tool()
-    async def network_continue(
-        page_id: str,
-        url_pattern: str,
-    ) -> str:
-        """Remove a previously set network interception route.
+            Args:
+                page_id: Target page ID.
+                clear: Clear the message buffer after reading.
+            """
+            messages = _session.get_console_messages(page_id)[-100:]
+            if clear:
+                _session.clear_console_messages(page_id)
+            return {"messages": messages, "count": len(messages)}
 
-        Args:
-            page_id: Target page ID.
-            url_pattern: The same URL pattern used in network_intercept().
-        """
-        return await _safe_call(handle_network_continue, _session, {
-            "page_id": page_id,
-            "url_pattern": url_pattern,
-        })
-
-    # -----------------------------------------------------------------------
-    # Page scripting
-    # -----------------------------------------------------------------------
-
-    @mcp.tool()
-    async def add_init_script(
-        page_id: str,
-        script: str,
-    ) -> str:
-        """Add a JavaScript init script that runs before every page load.
-
-        Useful for injecting polyfills, overriding APIs, or setting up monitoring.
-
-        Args:
-            page_id: Target page ID.
-            script: JavaScript code to run before page scripts.
-        """
-        return await _safe_call(handle_add_init_script, _session, {
-            "page_id": page_id,
-            "script": script,
-        })
-
-    # -----------------------------------------------------------------------
-    # Stealth inspection
-    # -----------------------------------------------------------------------
-
-    @mcp.tool()
-    async def stealth_config() -> str:
-        """Show the current default CloakBrowser stealth configuration and args."""
-        return await _safe_call(handle_stealth_config, {})
-
-    @mcp.tool()
-    async def binary_info() -> str:
-        """Get info about the CloakBrowser binary (version, path, features)."""
-        return await _safe_call(handle_get_binary_info, {})
-
-    # -----------------------------------------------------------------------
-    # MCP Prompts — common agent workflows
-    # -----------------------------------------------------------------------
+    # ===================================================================
+    # MCP Prompts
+    # ===================================================================
 
     @mcp.prompt()
     def browse_and_extract(url: str, what: str = "main content") -> str:
-        """Browse a URL and extract specific content.
+        """Browse a URL and extract content.
 
         Args:
-            url: The URL to visit.
-            what: What to extract (e.g. 'main article text', 'all product prices', 'contact info').
+            url: URL to visit.
+            what: What to extract.
         """
         return (
             f"Use CloakBrowser to visit {url} and extract: {what}\n\n"
-            "Steps:\n"
-            "1. launch_browser()\n"
-            "2. navigate(page_id, url)\n"
-            "3. snapshot(page_id) to see page structure\n"
-            "4. get_text(page_id) to read the content\n"
-            "5. If needed, get_links(page_id) to find sub-pages\n"
-            "6. Extract the requested information\n"
-            "7. close_browser()\n"
+            "1. cloak_launch()\n"
+            "2. cloak_navigate(page_id, url)\n"
+            "3. cloak_snapshot(page_id) to see structure\n"
+            "4. cloak_read_page(page_id) to get markdown content\n"
+            "5. Extract the requested information\n"
+            "6. cloak_close()\n"
         )
 
     @mcp.prompt()
-    def fill_and_submit_form(url: str, instructions: str = "") -> str:
-        """Navigate to a page, fill out a form, and submit it.
+    def fill_form(url: str, instructions: str = "") -> str:
+        """Fill and submit a form.
 
         Args:
-            url: The URL with the form.
-            instructions: What to fill in and any specific values.
+            url: URL with the form.
+            instructions: What to fill in.
         """
         return (
-            f"Use CloakBrowser to fill and submit a form at {url}\n"
+            f"Use CloakBrowser to fill a form at {url}\n"
             f"Instructions: {instructions}\n\n"
-            "Steps:\n"
-            "1. launch_browser(humanize=True) — use humanize for form sites\n"
-            "2. navigate(page_id, url)\n"
-            "3. snapshot(page_id) to see all form fields with ref IDs\n"
-            "4. For each field, use type_ref() to fill it in\n"
-            "5. screenshot(page_id) before submitting to verify\n"
-            "6. click_ref() on the submit button, or smart_action(page_id, 'Submit')\n"
-            "7. wait_for_navigation(page_id) to confirm submission\n"
-            "8. get_text(page_id) to read the result\n"
-            "9. close_browser()\n"
+            "1. cloak_launch()\n"
+            "2. cloak_navigate(page_id, url)\n"
+            "3. cloak_snapshot(page_id) to see form fields with ref IDs\n"
+            "4. cloak_type(page_id, ref, value) for each field\n"
+            "5. cloak_screenshot(page_id) to verify before submit\n"
+            "6. cloak_click(page_id, submit_ref) to submit\n"
+            "7. cloak_read_page(page_id) to see result\n"
+            "8. cloak_close()\n"
         )
 
     @mcp.prompt()
-    def login_to_site(url: str, username: str = "", password: str = "") -> str:
-        """Log into a website with credentials.
+    def login(url: str, username: str = "", password: str = "") -> str:
+        """Log into a website.
 
         Args:
             url: Login page URL.
-            username: Username/email to use.
-            password: Password to use.
+            username: Username/email.
+            password: Password.
         """
         return (
             f"Use CloakBrowser to log into {url}\n\n"
-            "Steps:\n"
-            "1. launch_browser(humanize=True) — humanize helps avoid detection\n"
-            "2. navigate(page_id, url)\n"
-            "3. snapshot(page_id) to find username/password fields\n"
-            f"4. type_ref() the username field: {username or '[ask user]'}\n"
-            f"5. type_ref() the password field: {password or '[ask user]'}\n"
-            "6. click_ref() on the sign-in button, or smart_action(page_id, 'Sign In')\n"
-            "7. wait_for_navigation(page_id, state='networkidle')\n"
-            "8. snapshot(page_id) to verify login succeeded\n"
-            "9. Keep browser open for further actions\n"
-        )
-
-    @mcp.prompt()
-    def scrape_multiple_pages(start_url: str, pattern: str = "") -> str:
-        """Scrape data from multiple pages (pagination, search results, etc.).
-
-        Args:
-            start_url: Starting URL.
-            pattern: What data to collect from each page.
-        """
-        return (
-            f"Use CloakBrowser to scrape multiple pages starting at {start_url}\n"
-            f"Data to collect: {pattern or 'all main content'}\n\n"
-            "Steps:\n"
-            "1. launch_browser()\n"
-            "2. navigate(page_id, start_url)\n"
-            "3. get_text(page_id) — extract data from current page\n"
-            "4. snapshot(page_id) — find 'Next' or pagination links\n"
-            "5. Loop: click_ref() on next page, extract data, find next link\n"
-            "6. Collect all data and present it\n"
-            "7. close_browser()\n"
+            "1. cloak_launch()  # stealth + humanize ON by default\n"
+            "2. cloak_navigate(page_id, url)\n"
+            "3. cloak_snapshot(page_id) to find username/password fields\n"
+            f"4. cloak_type(page_id, username_ref, '{username or '[ask]'}')\n"
+            f"5. cloak_type(page_id, password_ref, '{password or '[ask]'}')\n"
+            "6. cloak_click(page_id, sign_in_ref)\n"
+            "7. cloak_snapshot(page_id) to verify login succeeded\n"
         )
 
     return mcp
 
 
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
 def main():
-    """Entry point for the CloakBrowserMCP server."""
-    # Only set our logger to INFO; keep the MCP library logger at WARNING
-    # to suppress noisy "Processing request of type CallToolRequest" messages.
-    logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
-    logging.getLogger("cloakbrowsermcp").setLevel(logging.INFO)
-    server = create_server()
-    server.run()
+    """Entry point for the cloakbrowsermcp CLI."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="CloakBrowser MCP Server")
+    parser.add_argument(
+        "--caps",
+        type=str,
+        default="",
+        help="Comma-separated capabilities to enable: network, cookies, pdf, console, all",
+    )
+    parser.add_argument(
+        "--transport",
+        type=str,
+        default="stdio",
+        choices=["stdio", "sse"],
+        help="MCP transport (default: stdio)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8931,
+        help="Port for SSE transport (default: 8931)",
+    )
+
+    args = parser.parse_args()
+
+    caps = set()
+    if args.caps:
+        caps = {c.strip().lower() for c in args.caps.split(",")}
+
+    _configure_logging()
+    server = create_server(caps=caps)
+
+    if args.transport == "sse":
+        server.run(transport="sse", port=args.port)
+    else:
+        server.run(transport="stdio")
 
 
 if __name__ == "__main__":
