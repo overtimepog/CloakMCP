@@ -1,0 +1,58 @@
+{
+  "name": "cloakbrowsermcp",
+  "version": "2.0.0",
+  "description": "Stealth browser MCP server — anti-detection Chromium with snapshot-first AI agent interface. Passes Cloudflare Turnstile, reCAPTCHA v3, and 30+ bot detectors.",
+  "author": "overtimepog",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/overtimepog/CloakMCP",
+  "repository": "https://github.com/overtimepog/CloakMCP",
+  "keywords": [
+    "mcp",
+    "browser",
+    "stealth",
+    "chromium",
+    "anti-detect",
+    "cloudflare",
+    "recaptcha",
+    "turnstile",
+    "web-scraping",
+    "ai-agent",
+    "accessibility-tree",
+    "snapshot"
+  ],
+  "install": {
+    "pip": "cloakbrowsermcp"
+  },
+  "run": {
+    "command": "cloakbrowsermcp",
+    "transport": "stdio"
+  },
+  "tools": [
+    "cloak_launch",
+    "cloak_navigate",
+    "cloak_snapshot",
+    "cloak_click",
+    "cloak_type",
+    "cloak_scroll",
+    "cloak_screenshot",
+    "cloak_read_page",
+    "cloak_press_key",
+    "cloak_select",
+    "cloak_check",
+    "cloak_hover",
+    "cloak_evaluate",
+    "cloak_wait",
+    "cloak_pdf",
+    "cloak_new_page",
+    "cloak_close_page",
+    "cloak_list_pages",
+    "cloak_back",
+    "cloak_forward",
+    "cloak_console",
+    "cloak_network_intercept",
+    "cloak_network_continue",
+    "cloak_get_cookies",
+    "cloak_set_cookies",
+    "cloak_close"
+  ]
+}
