@@ -179,7 +179,10 @@ async def _do_launch(params: dict) -> dict:
         extra_args=params.get("extra_args", []),
         fingerprint_seed=params.get("fingerprint_seed"),
         user_data_dir=params.get("user_data_dir"),
-        viewport={"width": params.get("viewport_width", 1920), "height": params.get("viewport_height", 947)},
+        viewport={
+            "width": params.get("viewport_width", 1280 if not params.get("headless", True) else 1920),
+            "height": params.get("viewport_height", 720 if not params.get("headless", True) else 947),
+        },
         color_scheme=params.get("color_scheme"),
         user_agent=params.get("user_agent"),
     )
@@ -349,8 +352,8 @@ def create_server(caps: set[str] | None = None) -> FastMCP:
             geoip: Auto-detect timezone/locale from proxy IP.
             fingerprint_seed: Fixed seed for consistent identity across sessions.
             user_data_dir: Persistent profile path (cookies/localStorage survive restarts).
-            viewport_width: Viewport width in pixels.
-            viewport_height: Viewport height in pixels.
+            viewport_width: Viewport width in pixels (default: 1280 headed, 1920 headless).
+            viewport_height: Viewport height in pixels (default: 720 headed, 947 headless).
             color_scheme: 'light', 'dark', or 'no-preference'.
             user_agent: Custom user agent override.
             extra_args: Additional Chromium CLI flags.
