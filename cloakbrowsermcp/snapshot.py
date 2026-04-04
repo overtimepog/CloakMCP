@@ -339,7 +339,7 @@ async def take_snapshot(
         dict with keys: snapshot, interactive_elements, truncated, loading_detected
     """
     # Set mode flag on the page
-    await page.evaluate("window.__snapshot_full_mode = arguments[0]", full)
+    await page.evaluate(f"window.__snapshot_full_mode = {'true' if full else 'false'}")
 
     # Evaluate the snapshot JS
     result = await page.evaluate(SNAPSHOT_JS)
