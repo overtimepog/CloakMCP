@@ -1,5 +1,7 @@
 # CloakBrowser MCP
 
+<!-- mcp-name: io.github.overtimepog/CloakMCP -->
+
 **Stealth browser automation for AI agents** — a [Model Context Protocol](https://modelcontextprotocol.io) server combining CloakBrowser's anti-detection with Playwright MCP-inspired architecture.
 
 CloakBrowser is a source-level patched Chromium that passes Cloudflare Turnstile, reCAPTCHA v3 (0.9 score), FingerprintJS, BrowserScan, and 30+ bot detection services.

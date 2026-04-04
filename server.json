@@ -9,7 +9,7 @@
   "version": "2.0.0",
   "packages": [
     {
-      "registryType": "pip",
+      "registryType": "pypi",
       "identifier": "cloakbrowsermcp",
       "version": "2.0.0",
       "transport": {
