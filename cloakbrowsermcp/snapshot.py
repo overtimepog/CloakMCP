@@ -5,7 +5,7 @@ from __future__ import annotations
 SNAPSHOT_JS = """
 (() => {
   const FULL = !!window.__snapshot_full_mode;
-  const MAX_DEPTH = 6;
+  const MAX_DEPTH = 15;
   const TEXT_LIMIT = FULL ? 80 : 40;
   const MAX_OPTIONS = 5;
 
@@ -14,15 +14,47 @@ SNAPSHOT_JS = """
   const loadingEls = document.querySelectorAll(loadingSelectors);
   const loadingDetected = loadingEls.length > 0;
 
-  // --- Visibility check ---
+  // --- Detect top-layer / modal elements ---
+  const MODAL_SELECTORS = [
+    'dialog[open]', '[role="dialog"]', '[role="alertdialog"]',
+    '[aria-modal="true"]', '.modal.show', '.modal.open',
+    '.modal[style*="display: block"]', '.modal[style*="display:block"]',
+    '[data-state="open"][role="dialog"]'
+  ];
+  function findModals() {
+    const modals = [];
+    for (const sel of MODAL_SELECTORS) {
+      try { document.querySelectorAll(sel).forEach(m => { if (!modals.includes(m)) modals.push(m); }); }
+      catch(e) {}
+    }
+    return modals;
+  }
+
+  // --- Visibility check (fixed for modals/fixed ancestors) ---
+  function hasFixedOrStickyAncestor(el) {
+    let cur = el.parentElement;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      const pos = getComputedStyle(cur).position;
+      if (pos === 'fixed' || pos === 'sticky' || pos === 'absolute') return true;
+      cur = cur.parentElement;
+    }
+    return false;
+  }
+
   function isVisible(el) {
     if (!el || el.nodeType !== 1) return false;
-    if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed' && getComputedStyle(el).position !== 'sticky') {
-      if (el.tagName !== 'BODY' && el.tagName !== 'HTML') return false;
+    if (el.offsetParent === null) {
+      const pos = getComputedStyle(el).position;
+      if (pos !== 'fixed' && pos !== 'sticky') {
+        if (el.tagName !== 'BODY' && el.tagName !== 'HTML') {
+          // Check if inside a fixed/absolute ancestor (common for modals)
+          if (!hasFixedOrStickyAncestor(el)) return false;
+        }
+      }
     }
     const style = getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-    if (el.hasAttribute('hidden')) return false;
+    if (el.hasAttribute('hidden') && !el.matches('dialog[open]')) return false;
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) return false;
     return true;
@@ -310,8 +342,172 @@ SNAPSHOT_JS = """
   lines.push(header);
   lines.push('---');
 
-  // Walk the DOM
-  describeElement(document.body, 0);
+  // --- Prioritize modals/dialogs (render them FIRST) ---
+  const modals = findModals();
+  const modalSet = new Set(modals);
+  const walkedModals = new Set();
+
+  if (modals.length > 0) {
+    lines.push('[Modal/Dialog]');
+    for (const modal of modals) {
+      describeElement(modal, 0);
+      walkedModals.add(modal);
+    }
+    lines.push('[Page Content]');
+  }
+
+  // Walk the rest of the DOM, skipping already-rendered modals
+  const origDescribe = describeElement;
+  const oldDescribeElement = describeElement;
+
+  // Use a flag to skip modal subtrees during main walk
+  function describeElementSkipModals(el, depth) {
+    if (walkedModals.has(el)) return;
+    if (depth > MAX_DEPTH) return;
+    if (!isVisible(el)) return;
+
+    const tag = el.tagName.toLowerCase();
+    const indent = '  '.repeat(Math.min(depth, MAX_DEPTH));
+    const role = el.getAttribute('role');
+    const ariaExpanded = el.getAttribute('aria-expanded');
+    const ariaChecked = el.getAttribute('aria-checked');
+    const ariaSelected = el.getAttribute('aria-selected');
+    const disabled = el.hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true';
+
+    if (['script', 'style', 'noscript', 'template', 'svg', 'path'].includes(tag)) return;
+
+    let isInt = isInteractive(el);
+    let ref = '';
+    if (isInt) {
+      const key = addRef(el);
+      ref = '[@' + key + ']';
+    }
+
+    let loadingMark = '';
+    try { if (el.matches(loadingSelectors)) loadingMark = ' [loading]'; } catch(e) {}
+
+    let desc = '';
+
+    if (tag === 'input') {
+      const type = (el.getAttribute('type') || 'text').toLowerCase();
+      const label = getLabel(el);
+      const val = el.value || '';
+      const placeholder = el.getAttribute('placeholder') || '';
+      if (type === 'checkbox' || type === 'radio') {
+        const checked = el.checked ? '[x]' : '[ ]';
+        desc = indent + ref + ' ' + checked + ' ' + (label || type) + loadingMark;
+      } else {
+        const display = val ? truncText(val) : (placeholder ? '(' + truncText(placeholder) + ')' : '');
+        desc = indent + ref + ' input[' + type + '] ' + (label ? '"' + truncText(label) + '"' : '') + (display ? ': ' + display : '') + loadingMark;
+      }
+    } else if (tag === 'textarea') {
+      const label = getLabel(el);
+      const val = el.value || '';
+      const placeholder = el.getAttribute('placeholder') || '';
+      const display = val ? truncText(val) : (placeholder ? '(' + truncText(placeholder) + ')' : '');
+      desc = indent + ref + ' textarea ' + (label ? '"' + truncText(label) + '"' : '') + (display ? ': ' + display : '') + loadingMark;
+    } else if (tag === 'select') {
+      const label = getLabel(el);
+      const options = Array.from(el.options);
+      const selected = el.selectedIndex >= 0 ? options[el.selectedIndex] : null;
+      let optList = options.slice(0, MAX_OPTIONS).map(o => { const sel = o.selected ? '(*) ' : ''; return sel + truncText(o.textContent); });
+      if (options.length > MAX_OPTIONS) optList.push('... +' + (options.length - MAX_OPTIONS) + ' more');
+      desc = indent + ref + ' select ' + (label ? '"' + truncText(label) + '"' : '') + (selected ? ' = ' + truncText(selected.textContent) : '') + loadingMark;
+      if (FULL) { optList.forEach(o => lines.push(indent + '  ' + o)); }
+    } else if (tag === 'button' || role === 'button') {
+      desc = indent + ref + ' button "' + truncText(el.textContent) + '"' + (disabled ? ' [disabled]' : '') + loadingMark;
+    } else if (tag === 'a') {
+      const text = truncText(el.textContent);
+      const href = el.getAttribute('href') || '';
+      const hrefDisplay = href.length > 50 ? href.slice(0, 47) + '...' : href;
+      desc = indent + ref + ' link "' + text + '"' + (FULL ? ' -> ' + hrefDisplay : '') + loadingMark;
+    } else if (tag === 'img') {
+      const alt = el.getAttribute('alt') || '';
+      desc = indent + 'img' + (alt ? ' "' + truncText(alt) + '"' : ' [no alt]') + loadingMark;
+    } else if (['h1','h2','h3','h4','h5','h6'].includes(tag)) {
+      desc = indent + tag + ' "' + truncText(el.textContent) + '"' + loadingMark;
+    } else if (tag === 'nav') {
+      desc = indent + 'nav' + (el.getAttribute('aria-label') ? ' "' + el.getAttribute('aria-label') + '"' : '') + loadingMark;
+    } else if (tag === 'main' || role === 'main') {
+      desc = indent + 'main' + loadingMark;
+    } else if (tag === 'form') {
+      desc = indent + 'form' + (el.getAttribute('aria-label') ? ' "' + el.getAttribute('aria-label') + '"' : '') + loadingMark;
+    } else if (tag === 'table') {
+      desc = indent + 'table' + loadingMark;
+    } else if (tag === 'dialog' || role === 'dialog' || role === 'alertdialog') {
+      const label = el.getAttribute('aria-label') || '';
+      desc = indent + (ref || '') + ' dialog' + (label ? ' "' + truncText(label) + '"' : '') + loadingMark;
+    } else if (role === 'tablist') {
+      desc = indent + 'tablist' + loadingMark;
+    } else if (role === 'tab') {
+      const text = truncText(el.textContent);
+      const sel = ariaSelected === 'true' ? ' [selected]' : '';
+      desc = indent + ref + ' tab "' + text + '"' + sel + loadingMark;
+    } else if (role === 'menu' || role === 'menubar') {
+      desc = indent + role + loadingMark;
+    } else if (role === 'menuitem') {
+      desc = indent + ref + ' menuitem "' + truncText(el.textContent) + '"' + loadingMark;
+    } else if (role === 'switch' || role === 'checkbox') {
+      const checked = ariaChecked === 'true' ? '[x]' : '[ ]';
+      const label = getLabel(el) || el.textContent.trim();
+      desc = indent + ref + ' ' + checked + ' ' + truncText(label) + loadingMark;
+    } else if (tag === 'details') {
+      const open = el.hasAttribute('open') ? '[open]' : '[closed]';
+      desc = indent + 'details ' + open + loadingMark;
+    } else if (tag === 'summary') {
+      desc = indent + ref + ' summary "' + truncText(el.textContent) + '"' + loadingMark;
+    } else if (isInt) {
+      desc = indent + ref + ' ' + tag + (role ? '[' + role + ']' : '') + ' "' + truncText(el.textContent) + '"' + loadingMark;
+    }
+
+    if (ariaExpanded !== null && desc) {
+      desc += ariaExpanded === 'true' ? ' [expanded]' : ' [collapsed]';
+    }
+
+    if (desc) lines.push(desc);
+
+    if (!desc && !isInt) {
+      const directText = Array.from(el.childNodes)
+        .filter(n => n.nodeType === 3 && n.textContent.trim())
+        .map(n => truncText(n.textContent))
+        .join(' ');
+      if (directText && !['div','span','section','article','header','footer','li','ul','ol','td','th','tr','tbody','thead','p','dl','dt','dd'].includes(tag)) {
+        lines.push(indent + '"' + directText + '"');
+      } else if (directText && ['p','li','td','th','dt','dd','blockquote','figcaption','cite','label','legend'].includes(tag)) {
+        lines.push(indent + truncText(el.textContent));
+      }
+    }
+
+    const children = el.children;
+    for (let i = 0; i < children.length; i++) {
+      describeElementSkipModals(children[i], depth + (desc ? 1 : 0));
+    }
+
+    if (el.shadowRoot) {
+      const shadowChildren = el.shadowRoot.children;
+      for (let i = 0; i < shadowChildren.length; i++) {
+        describeElementSkipModals(shadowChildren[i], depth + 1);
+      }
+    }
+
+    if (tag === 'iframe') {
+      try {
+        const iframeDoc = el.contentDocument || el.contentWindow.document;
+        if (iframeDoc && iframeDoc.body) {
+          lines.push(indent + '  [iframe content]');
+          describeElementSkipModals(iframeDoc.body, depth + 1);
+        }
+      } catch(e) {
+        lines.push(indent + '  [iframe: cross-origin]');
+      }
+    }
+  }
+
+  if (modals.length > 0) {
+    describeElementSkipModals(document.body, 0);
+  } else {
+    describeElement(document.body, 0);
+  }
 
   return {
     snapshot: lines.join('\\n'),
