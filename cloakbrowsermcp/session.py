@@ -18,6 +18,96 @@ from cloakbrowser import launch_async, launch_persistent_context_async
 logger = logging.getLogger("cloakbrowsermcp")
 
 
+def detect_screen_size() -> tuple[int, int] | None:
+    """Detect the usable screen resolution for headed mode.
+
+    Returns (width, height) of the visible screen area (minus dock/menubar/taskbar),
+    or None if detection fails. Works on macOS, Linux (X11), and Windows.
+    """
+    import sys
+    try:
+        if sys.platform == "darwin":
+            # macOS: use AppKit for accurate logical (scaled) resolution
+            try:
+                import AppKit  # type: ignore[import-untyped]
+                screen = AppKit.NSScreen.mainScreen()
+                visible = screen.visibleFrame()
+                return (int(visible.size.width), int(visible.size.height))
+            except ImportError:
+                # Fallback: use Quartz CoreGraphics
+                try:
+                    import Quartz  # type: ignore[import-untyped]
+                    main = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
+                    return (int(main.size.width), int(main.size.height))
+                except ImportError:
+                    pass
+
+        elif sys.platform == "win32":
+            import ctypes
+            user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+            # SM_CXSCREEN=0, SM_CYSCREEN=1 for full; SM_CXFULLSCREEN=16, SM_CYFULLSCREEN=17 for work area
+            w = user32.GetSystemMetrics(16)  # work area width
+            h = user32.GetSystemMetrics(17)  # work area height
+            if w > 0 and h > 0:
+                return (w, h)
+
+        else:
+            # Linux: try xdpyinfo or xrandr
+            import subprocess
+            try:
+                out = subprocess.check_output(
+                    ["xdpyinfo"], stderr=subprocess.DEVNULL, text=True, timeout=3
+                )
+                for line in out.splitlines():
+                    if "dimensions:" in line:
+                        # e.g. "  dimensions:    1920x1080 pixels ..."
+                        parts = line.split()[1].split("x")
+                        return (int(parts[0]), int(parts[1]))
+            except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                pass
+            try:
+                out = subprocess.check_output(
+                    ["xrandr", "--current"], stderr=subprocess.DEVNULL, text=True, timeout=3
+                )
+                import re
+                m = re.search(r"current\s+(\d+)\s*x\s*(\d+)", out)
+                if m:
+                    return (int(m.group(1)), int(m.group(2)))
+            except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                pass
+
+    except Exception as exc:
+        logger.debug("Screen detection failed: %s", exc)
+
+    return None
+
+
+def compute_headed_viewport(
+    screen: tuple[int, int] | None,
+    scale: float = 0.80,
+    min_w: int = 900,
+    min_h: int = 600,
+) -> tuple[int, int]:
+    """Compute a sensible headed viewport that fits the user's screen.
+
+    Uses `scale` fraction of the visible screen area (default 80%).
+    Falls back to 1280x800 if screen detection fails.
+    """
+    if screen is None:
+        return (1280, 800)
+
+    sw, sh = screen
+    w = max(min_w, int(sw * scale))
+    h = max(min_h, int(sh * scale))
+    # Cap to sensible maximums for headed mode (avoids Retina physical-pixel issues)
+    w = min(w, 1440)
+    h = min(h, 900)
+    # Round down to nearest 10 for clean numbers
+    w = (w // 10) * 10
+    h = (h // 10) * 10
+    return (w, h)
+
+
 class BrowserSessionError(RuntimeError):
     """Raised when the browser session is in an invalid state."""
     pass

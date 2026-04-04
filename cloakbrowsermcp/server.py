@@ -167,8 +167,31 @@ async def _do_launch(params: dict) -> dict:
     if _session._browser is not None or _session._context is not None:
         _session._force_cleanup()
 
+    headless = params.get("headless", True)
+    explicit_w = params.get("viewport_width")
+    explicit_h = params.get("viewport_height")
+
+    if headless:
+        vp_w = explicit_w or 1920
+        vp_h = explicit_h or 947
+    else:
+        # Headed mode: auto-detect screen size if user didn't specify
+        if explicit_w and explicit_h:
+            vp_w, vp_h = explicit_w, explicit_h
+        else:
+            from .session import detect_screen_size, compute_headed_viewport
+            screen = detect_screen_size()
+            auto_w, auto_h = compute_headed_viewport(screen)
+            vp_w = explicit_w or auto_w
+            vp_h = explicit_h or auto_h
+            if screen:
+                logger.info(
+                    "Auto-detected screen %dx%d -> headed viewport %dx%d",
+                    screen[0], screen[1], vp_w, vp_h,
+                )
+
     cfg = SessionConfig(
-        headless=params.get("headless", True),
+        headless=headless,
         proxy=params.get("proxy"),
         humanize=params.get("humanize", True),  # Stealth default: ON
         human_preset=params.get("human_preset", "default"),
@@ -179,10 +202,7 @@ async def _do_launch(params: dict) -> dict:
         extra_args=params.get("extra_args", []),
         fingerprint_seed=params.get("fingerprint_seed"),
         user_data_dir=params.get("user_data_dir"),
-        viewport={
-            "width": params.get("viewport_width", 1280 if not params.get("headless", True) else 1920),
-            "height": params.get("viewport_height", 720 if not params.get("headless", True) else 947),
-        },
+        viewport={"width": vp_w, "height": vp_h},
         color_scheme=params.get("color_scheme"),
         user_agent=params.get("user_agent"),
     )
@@ -330,8 +350,8 @@ def create_server(caps: set[str] | None = None) -> FastMCP:
         geoip: bool = False,
         fingerprint_seed: str | None = None,
         user_data_dir: str | None = None,
-        viewport_width: int = 1920,
-        viewport_height: int = 947,
+        viewport_width: int | None = None,
+        viewport_height: int | None = None,
         color_scheme: str | None = None,
         user_agent: str | None = None,
         extra_args: list[str] | None = None,
@@ -352,8 +372,8 @@ def create_server(caps: set[str] | None = None) -> FastMCP:
             geoip: Auto-detect timezone/locale from proxy IP.
             fingerprint_seed: Fixed seed for consistent identity across sessions.
             user_data_dir: Persistent profile path (cookies/localStorage survive restarts).
-            viewport_width: Viewport width in pixels (default: 1280 headed, 1920 headless).
-            viewport_height: Viewport height in pixels (default: 720 headed, 947 headless).
+            viewport_width: Viewport width in pixels (default: 1920 headless; 1280 headed fallback, or auto-detected).
+            viewport_height: Viewport height in pixels (default: 947 headless; 800 headed fallback, or auto-detected).
             color_scheme: 'light', 'dark', or 'no-preference'.
             user_agent: Custom user agent override.
             extra_args: Additional Chromium CLI flags.

@@ -51,6 +51,40 @@ class TestSessionConfig:
         assert cfg.user_data_dir == "/tmp/profile"
 
 
+class TestScreenDetection:
+    """Test screen auto-detection and headed viewport computation."""
+
+    def test_compute_headed_viewport_with_screen(self):
+        from cloakbrowsermcp.session import compute_headed_viewport
+        w, h = compute_headed_viewport((1470, 866))
+        assert w == 1170  # 1470 * 0.80 = 1176 -> rounded to 1170
+        assert h == 690   # 866 * 0.80 = 692.8 -> rounded to 690
+
+    def test_compute_headed_viewport_no_screen(self):
+        from cloakbrowsermcp.session import compute_headed_viewport
+        w, h = compute_headed_viewport(None)
+        assert w == 1280
+        assert h == 800
+
+    def test_compute_headed_viewport_small_screen(self):
+        from cloakbrowsermcp.session import compute_headed_viewport
+        # Very small screen should clamp to minimums
+        w, h = compute_headed_viewport((800, 600))
+        assert w >= 900
+        assert h >= 600
+
+    def test_compute_headed_viewport_large_screen(self):
+        from cloakbrowsermcp.session import compute_headed_viewport
+        w, h = compute_headed_viewport((2560, 1440))
+        assert w == 1440  # 2560 * 0.80 = 2048 -> capped to 1440
+        assert h == 900   # 1440 * 0.80 = 1152 -> capped to 900
+
+    def test_detect_screen_size_returns_tuple_or_none(self):
+        from cloakbrowsermcp.session import detect_screen_size
+        result = detect_screen_size()
+        assert result is None or (isinstance(result, tuple) and len(result) == 2)
+
+
 def _make_mock_page(closed=False):
     """Create a mock page that supports event handlers."""
     mock_page = AsyncMock()
