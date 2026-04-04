@@ -519,8 +519,98 @@ SNAPSHOT_JS = """
 """
 
 
+def _compress_snapshot(text: str, max_length: int) -> tuple[str, bool]:
+    """Compress a snapshot by progressively removing non-interactive content.
+
+    Strategy (applied in order until under max_length):
+      1. Remove pure text lines (no [@eN] ref, no structural tag like h1/form/nav/table/dialog)
+      2. Collapse consecutive blank lines
+      3. Remove img lines without refs
+      4. Hard truncate as last resort
+
+    Returns:
+        (compressed_text, was_compressed)
+    """
+    import re
+
+    if len(text) <= max_length:
+        return text, False
+
+    lines = text.split("\n")
+
+    # Find the header (first 3 lines: Page/URL/Viewport/---)
+    header_end = 0
+    for i, line in enumerate(lines):
+        if line.strip() == "---":
+            header_end = i + 1
+            break
+    header_lines = lines[:header_end]
+    content_lines = lines[header_end:]
+
+    # Ref pattern
+    ref_pat = re.compile(r"\[@e\d+\]")
+    # Structural tags worth keeping even without refs
+    structural_pat = re.compile(
+        r"^\s*(h[1-6]\s|form|nav|main|table|tablist|dialog|"
+        r"\[Modal/Dialog\]|\[Page Content\]|\[iframe)"
+    )
+
+    # --- Pass 1: Remove pure text/decoration lines ---
+    kept = []
+    for line in content_lines:
+        stripped = line.strip()
+        if not stripped:
+            kept.append(line)
+            continue
+        # Always keep lines with refs
+        if ref_pat.search(line):
+            kept.append(line)
+            continue
+        # Keep structural markers
+        if structural_pat.match(stripped):
+            kept.append(line)
+            continue
+        # Drop pure text lines (quoted strings, plain descriptions)
+        # but keep them if we're still under budget — drop only as needed
+        kept.append(line)
+
+    result = "\n".join(header_lines + kept)
+    if len(result) <= max_length:
+        return result, False
+
+    # --- Pass 2: Actually drop non-ref, non-structural lines ---
+    kept2 = []
+    for line in content_lines:
+        stripped = line.strip()
+        if not stripped:
+            continue  # drop blank lines
+        if ref_pat.search(line):
+            kept2.append(line)
+            continue
+        if structural_pat.match(stripped):
+            kept2.append(line)
+            continue
+        # Drop this line (pure text / img without ref / decoration)
+
+    result = "\n".join(header_lines + kept2)
+    if len(result) <= max_length:
+        return result, True
+
+    # --- Pass 3: Drop img lines without refs ---
+    kept3 = [l for l in kept2 if not (l.strip().startswith("img") and not ref_pat.search(l))]
+    result = "\n".join(header_lines + kept3)
+    if len(result) <= max_length:
+        return result, True
+
+    # --- Pass 4: Hard truncate as last resort ---
+    result = "\n".join(header_lines + kept3)
+    if len(result) > max_length:
+        result = result[:max_length] + "\n... [truncated]"
+    return result, True
+
+
 async def take_snapshot(
-    page, page_id: str, session, full: bool = False, max_length: int = 8000
+    page, page_id: str, session, full: bool = False, max_length: int = 12000
 ) -> dict:
     """Take an accessibility tree snapshot of the current page.
 
@@ -548,11 +638,11 @@ async def take_snapshot(
     # Store refs in session
     session.set_refs(page_id, refs)
 
-    # Truncate if needed
+    # Smart compression: preserve interactive refs, drop decoration text first
     truncated = False
     if len(snapshot_text) > max_length:
-        snapshot_text = snapshot_text[:max_length] + "\n... [truncated]"
-        truncated = True
+        snapshot_text, was_compressed = _compress_snapshot(snapshot_text, max_length)
+        truncated = was_compressed or len(snapshot_text) > max_length
 
     return {
         "snapshot": snapshot_text,

@@ -135,7 +135,7 @@ async def _safe_snap(handler, *args, **kwargs) -> dict[str, Any]:
         if page_id and not result.get("error"):
             try:
                 page = _session.get_page(page_id)
-                snap = await take_snapshot(page, page_id, _session, full=False, max_length=6000)
+                snap = await take_snapshot(page, page_id, _session, full=False, max_length=8000)
                 result["_snapshot"] = snap.get("snapshot", "")
                 result["_refs"] = snap.get("interactive_elements", 0)
             except Exception:
@@ -402,7 +402,7 @@ def create_server(caps: set[str] | None = None) -> FastMCP:
     async def cloak_snapshot(
         page_id: str,
         full: bool = False,
-        max_length: int = 8000,
+        max_length: int = 12000,
     ) -> dict[str, Any]:
         """Capture the page's accessibility tree — the PRIMARY way to understand pages.
 
@@ -418,7 +418,7 @@ def create_server(caps: set[str] | None = None) -> FastMCP:
         Args:
             page_id: Target page ID from cloak_launch or cloak_new_page.
             full: Include text content alongside interactive elements.
-            max_length: Max characters to return (default: 8000).
+            max_length: Max characters to return (default: 12000).
         """
         page = _session.get_page(page_id)
         return await _safe(take_snapshot, page, page_id, _session, full=full, max_length=max_length)
