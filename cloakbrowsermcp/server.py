@@ -825,6 +825,21 @@ def create_server(caps: set[str] | None = None) -> FastMCP:
                 _session.clear_console_messages(page_id)
             return {"messages": messages, "count": len(messages)}
 
+    if "downloads" in _capabilities or "all" in _capabilities:
+
+        @mcp.tool()
+        async def cloak_downloads(page_id: str) -> dict[str, Any]:
+            """Get list of files downloaded by the browser on a page.
+
+            Returns downloaded file info including suggested filenames and local paths.
+            After clicking a download link, call this to retrieve the downloaded file path.
+
+            Args:
+                page_id: Target page ID.
+            """
+            downloads = _session.get_downloads(page_id)
+            return {"downloads": downloads, "total": len(downloads)}
+
     # ===================================================================
     # MCP Prompts
     # ===================================================================

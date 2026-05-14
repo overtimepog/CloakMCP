@@ -146,6 +146,7 @@ class SessionConfig:
     color_scheme: str | None = None
     user_agent: str | None = None
     backend: str | None = None
+    download_path: str = "/tmp/cloak_downloads"
 
 
 class BrowserSession:
@@ -166,6 +167,8 @@ class BrowserSession:
         self._refs: dict[str, dict[str, dict]] = {}
         # Console messages captured per page
         self._console_messages: dict[str, list[dict]] = {}
+        # Downloaded files per page
+        self._downloads: dict[str, list[dict]] = {}
 
     @property
     def is_running(self) -> bool:
@@ -265,8 +268,9 @@ class BrowserSession:
         return location
 
     def _setup_console_capture(self, page_id: str, page: Any) -> None:
-        """Set up console message capture for a page."""
+        """Set up console message capture and download tracking for a page."""
         self._console_messages[page_id] = []
+        self._downloads[page_id] = []
 
         def on_console(msg):
             entry: dict[str, Any] = {
@@ -291,6 +295,27 @@ class BrowserSession:
         page.on("console", on_console)
         page.on("pageerror", on_page_error)
 
+        # Track downloads
+        # NOTE: Playwright's page.on() does NOT await async callbacks, so we
+        # wrap the async handler with asyncio.ensure_future inside a sync wrapper.
+        async def _handle_download(download):
+            try:
+                path = await download.path()
+                self._downloads.setdefault(page_id, []).append({
+                    "url": download.url,
+                    "suggested_filename": download.suggested_filename,
+                    "path": path,
+                    "state": download.state,
+                })
+                logger.info("Download captured: %s -> %s", download.suggested_filename, path)
+            except Exception as e:
+                logger.warning("Download handler error for %s: %s", download.url, e)
+
+        def on_download(download):
+            asyncio.ensure_future(_handle_download(download))
+
+        page.on("download", on_download)
+
     # -----------------------------------------------------------------------
     # Stale session cleanup
     # -----------------------------------------------------------------------
@@ -306,6 +331,7 @@ class BrowserSession:
         self._route_handlers.clear()
         self._refs.clear()
         self._console_messages.clear()
+        self._downloads.clear()
         self._browser = None
         self._context = None
         self.config = None
@@ -325,6 +351,10 @@ class BrowserSession:
             self._force_cleanup()
 
         self.config = config
+
+        # Ensure download directory exists
+        import os
+        os.makedirs(config.download_path, exist_ok=True)
 
         # Build extra args with fingerprint seed if specified
         args = list(config.extra_args)
@@ -422,6 +452,7 @@ class BrowserSession:
             # Create a new context for each page for isolation
             context = await self._browser.new_context(
                 viewport=self.config.viewport if self.config else None,
+                accept_downloads=True,
             )
             page = await context.new_page()
 
@@ -459,6 +490,7 @@ class BrowserSession:
             del self.pages[page_id]
             self._refs.pop(page_id, None)
             self._console_messages.pop(page_id, None)
+            self._downloads.pop(page_id, None)
             raise PageClosedError(
                 f"Page '{page_id}' has been closed or crashed. "
                 "Use new_page() to create a new one, or launch_browser() to restart."
@@ -473,6 +505,7 @@ class BrowserSession:
         del self.pages[page_id]
         self._refs.pop(page_id, None)
         self._console_messages.pop(page_id, None)
+        self._downloads.pop(page_id, None)
         logger.debug("Page closed: %s", page_id)
 
     def list_pages(self) -> list[dict[str, str]]:
@@ -484,6 +517,14 @@ class BrowserSession:
                 "url": page.url,
             })
         return result
+
+    # -----------------------------------------------------------------------
+    # Download management
+    # -----------------------------------------------------------------------
+
+    def get_downloads(self, page_id: str) -> list[dict]:
+        """Get list of downloaded files for a page."""
+        return self._downloads.get(page_id, [])
 
     # -----------------------------------------------------------------------
     # Page settling (wait for DOM + network stability)
