@@ -301,11 +301,13 @@ class BrowserSession:
         async def _handle_download(download):
             try:
                 path = await download.path()
+                failure = await download.failure()
+                state = "completed" if failure is None else "failed"
                 self._downloads.setdefault(page_id, []).append({
                     "url": download.url,
                     "suggested_filename": download.suggested_filename,
                     "path": path,
-                    "state": download.state,
+                    "state": state,
                 })
                 logger.info("Download captured: %s -> %s", download.suggested_filename, path)
             except Exception as e:
