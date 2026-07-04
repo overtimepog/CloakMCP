@@ -10,12 +10,33 @@ import asyncio
 import uuid
 import time
 import logging
+import warnings
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 
 from cloakbrowser import launch_async, launch_persistent_context_async
 
 logger = logging.getLogger("cloakbrowsermcp")
+
+
+@lru_cache(maxsize=1)
+def _cloakbrowser_supports_backend() -> bool:
+    """Check whether the installed cloakbrowser still accepts the `backend` kwarg.
+
+    cloakbrowser >=0.4.0 removed the `backend` parameter and the
+    `cloakbrowser[patchright]` extra.  Passing `backend=...` on a
+    modern cloakbrowser hits a TypeError guard in `_check_removed_kwargs`.
+    """
+    import inspect
+    try:
+        sig = inspect.signature(launch_async)
+        return "backend" in sig.parameters
+    except Exception:
+        # If introspection fails, assume the modern shape: do not forward
+        # `backend`, since forwarding it on a modern cloakbrowser raises a
+        # hard TypeError.  Safe default is to omit it.
+        return False
 
 
 def detect_screen_size() -> tuple[int, int] | None:
@@ -366,7 +387,7 @@ class BrowserSession:
         if config.user_data_dir:
             # Persistent context mode
             self._is_persistent = True
-            ctx = await launch_persistent_context_async(
+            launch_kwargs: dict[str, Any] = dict(
                 user_data_dir=config.user_data_dir,
                 headless=config.headless,
                 proxy=config.proxy,
@@ -381,14 +402,28 @@ class BrowserSession:
                 viewport=config.viewport,
                 user_agent=config.user_agent,
                 color_scheme=config.color_scheme,
-                backend=config.backend,
             )
+            if config.backend is not None:
+                if _cloakbrowser_supports_backend():
+                    launch_kwargs["backend"] = config.backend
+                else:
+                    warnings.warn(
+                        "SessionConfig.backend=%r is set but the installed "
+                        "cloakbrowser >=0.4.0 dropped the `backend` parameter "
+                        "(along with the patchright extra). Ignoring, using "
+                        "stock Playwright. Remove `backend=` from your "
+                        "SessionConfig to silence this warning."
+                        % config.backend,
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
+            ctx = await launch_persistent_context_async(**launch_kwargs)
             self._context = ctx
             self._browser = None
         else:
             # Standard browser mode
             self._is_persistent = False
-            browser = await launch_async(
+            launch_kwargs: dict[str, Any] = dict(
                 headless=config.headless,
                 proxy=config.proxy,
                 args=args if args else None,
@@ -399,8 +434,22 @@ class BrowserSession:
                 humanize=config.humanize,
                 human_preset=config.human_preset,
                 human_config=config.human_config,
-                backend=config.backend,
             )
+            if config.backend is not None:
+                if _cloakbrowser_supports_backend():
+                    launch_kwargs["backend"] = config.backend
+                else:
+                    warnings.warn(
+                        "SessionConfig.backend=%r is set but the installed "
+                        "cloakbrowser >=0.4.0 dropped the `backend` parameter "
+                        "(along with the patchright extra). Ignoring, using "
+                        "stock Playwright. Remove `backend=` from your "
+                        "SessionConfig to silence this warning."
+                        % config.backend,
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
+            browser = await launch_async(**launch_kwargs)
             self._browser = browser
             self._context = None
 

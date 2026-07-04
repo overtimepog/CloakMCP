@@ -50,7 +50,7 @@ dependencies = [
 
 [project.optional-dependencies]
 geoip = ["cloakbrowser[geoip]"]
-patchright = ["cloakbrowser[patchright]"]
+patchright = ["cloakbrowser[patchright]"] # no-op on cloakbrowser >=0.4.0 - backwards compatibility with cloakbrowser <0.4.0
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23",
