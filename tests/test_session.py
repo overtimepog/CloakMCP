@@ -1,8 +1,11 @@
 """Tests for BrowserSession — the core browser lifecycle manager."""
 
+import logging
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import cloakbrowsermcp.session as session_module
 from cloakbrowsermcp.session import BrowserSession, SessionConfig, BrowserSessionError, PageNotFoundError, PageClosedError
 
 
@@ -13,7 +16,7 @@ class TestSessionConfig:
         cfg = SessionConfig()
         assert cfg.headless is True
         assert cfg.proxy is None
-        assert cfg.humanize is False
+        assert cfg.humanize is True
         assert cfg.human_preset == "default"
         assert cfg.stealth_args is True
         assert cfg.timezone is None
@@ -420,3 +423,72 @@ class TestConsoleCapture:
         ]
         session.clear_console_messages("page_001")
         assert session.get_console_messages("page_001") == []
+
+
+class TestBackendCompatibility:
+    """`backend=` is forwarded on legacy cloakbrowser and ignored with a log on modern ones."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_backend_warning(self):
+        session_module._backend_warning_emitted = False
+        yield
+        session_module._backend_warning_emitted = False
+
+    @pytest.mark.asyncio
+    async def test_backend_forwarded_on_legacy_cloakbrowser(self):
+        seen = {}
+
+        async def legacy_launch(headless=True, backend=None, **kwargs):
+            seen["backend"] = backend
+            return _make_mock_browser()
+
+        with patch("cloakbrowsermcp.session.launch_async", legacy_launch):
+            await BrowserSession().launch(SessionConfig(backend="patchright"))
+
+        assert seen["backend"] == "patchright"
+
+    @pytest.mark.asyncio
+    async def test_backend_dropped_on_modern_cloakbrowser(self, caplog):
+        async def modern_launch(**kwargs):
+            assert "backend" not in kwargs
+            return _make_mock_browser()
+
+        with patch("cloakbrowsermcp.session.launch_async", modern_launch):
+            with caplog.at_level(logging.WARNING, logger="cloakbrowsermcp"):
+                session = BrowserSession()
+                await session.launch(SessionConfig(backend="patchright"))
+
+        assert session.is_running is True
+        assert any("backend" in record.getMessage() for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_persistent_launch_drops_backend_on_modern_cloakbrowser(self, caplog):
+        seen = {}
+
+        async def modern_persistent(user_data_dir, **kwargs):
+            seen.update(kwargs)
+            ctx = AsyncMock()
+            ctx.pages = []
+            return ctx
+
+        with patch("cloakbrowsermcp.session.launch_persistent_context_async", modern_persistent):
+            with caplog.at_level(logging.WARNING, logger="cloakbrowsermcp"):
+                session = BrowserSession()
+                await session.launch(SessionConfig(user_data_dir="/tmp/profile", backend="patchright"))
+
+        assert "backend" not in seen
+        assert session.is_running is True
+        assert any("backend" in record.getMessage() for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_backend_warning_logged_only_once(self, caplog):
+        async def modern_launch(**kwargs):
+            return _make_mock_browser()
+
+        with patch("cloakbrowsermcp.session.launch_async", modern_launch):
+            with caplog.at_level(logging.WARNING, logger="cloakbrowsermcp"):
+                for _ in range(2):
+                    await BrowserSession().launch(SessionConfig(backend="patchright"))
+
+        warnings = [r for r in caplog.records if "backend" in r.getMessage()]
+        assert len(warnings) == 1

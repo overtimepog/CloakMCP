@@ -178,6 +178,13 @@ cloak_launch(
 )
 ```
 
+> **Backend note:** `SessionConfig.backend` is deprecated. CloakBrowser 0.4.0
+> removed the patchright backend (it broke proxy auth and `add_init_script`
+> without improving stealth), so current versions ignore the setting and log a
+> one-time warning. If you still need it, `pip install "cloakbrowsermcp[patchright]"`
+> pins `cloakbrowser<0.4`, where the old backend still works, but it carries
+> those upstream bugs.
+
 ## Architecture
 
 ```
