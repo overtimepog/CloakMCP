@@ -7,36 +7,63 @@ operations through a single BrowserSession instance.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import uuid
 import time
 import logging
-import warnings
 from dataclasses import dataclass, field
-from functools import lru_cache
 from typing import Any
 
 from cloakbrowser import launch_async, launch_persistent_context_async
 
 logger = logging.getLogger("cloakbrowsermcp")
 
+_backend_warning_emitted = False
 
-@lru_cache(maxsize=1)
-def _cloakbrowser_supports_backend() -> bool:
-    """Check whether the installed cloakbrowser still accepts the `backend` kwarg.
 
-    cloakbrowser >=0.4.0 removed the `backend` parameter and the
-    `cloakbrowser[patchright]` extra.  Passing `backend=...` on a
-    modern cloakbrowser hits a TypeError guard in `_check_removed_kwargs`.
+def _cloakbrowser_supports_backend(launcher: Any) -> bool:
+    """Return True when the given launch function still accepts `backend=`.
+
+    cloakbrowser 0.4.0 removed the parameter (and the patchright extra), and
+    passing it there hits a TypeError guard in `_check_removed_kwargs`.
+
+    The launcher is inspected directly so the persistent and standard launch
+    paths each check the function they are about to call.
     """
-    import inspect
     try:
-        sig = inspect.signature(launch_async)
-        return "backend" in sig.parameters
+        return "backend" in inspect.signature(launcher).parameters
     except Exception:
-        # If introspection fails, assume the modern shape: do not forward
-        # `backend`, since forwarding it on a modern cloakbrowser raises a
-        # hard TypeError.  Safe default is to omit it.
+        # Assume the modern shape: forwarding would hard-fail the launch.
         return False
+
+
+def _apply_backend_kwarg(
+    launch_kwargs: dict[str, Any],
+    backend: str | None,
+    launcher: Any,
+) -> None:
+    """Forward `backend` when supported, otherwise log once that it is ignored.
+
+    Newer cloakbrowser releases dropped patchright because it broke proxy auth
+    and `add_init_script` without improving stealth.  The setting is accepted
+    for backwards compatibility, but must not be forwarded on those versions.
+    """
+    global _backend_warning_emitted
+    if backend is None:
+        return
+    if _cloakbrowser_supports_backend(launcher):
+        launch_kwargs["backend"] = backend
+        return
+    if _backend_warning_emitted:
+        return
+    _backend_warning_emitted = True
+    logger.warning(
+        "SessionConfig.backend=%r ignored: the installed cloakbrowser no "
+        "longer accepts the `backend` parameter, so stock Playwright is used. "
+        "CloakBrowser removed patchright because it broke proxy auth and "
+        "add_init_script. Remove `backend=` to silence this.",
+        backend,
+    )
 
 
 def detect_screen_size() -> tuple[int, int] | None:
@@ -403,20 +430,7 @@ class BrowserSession:
                 user_agent=config.user_agent,
                 color_scheme=config.color_scheme,
             )
-            if config.backend is not None:
-                if _cloakbrowser_supports_backend():
-                    launch_kwargs["backend"] = config.backend
-                else:
-                    warnings.warn(
-                        "SessionConfig.backend=%r is set but the installed "
-                        "cloakbrowser >=0.4.0 dropped the `backend` parameter "
-                        "(along with the patchright extra). Ignoring, using "
-                        "stock Playwright. Remove `backend=` from your "
-                        "SessionConfig to silence this warning."
-                        % config.backend,
-                        DeprecationWarning,
-                        stacklevel=2,
-                    )
+            _apply_backend_kwarg(launch_kwargs, config.backend, launch_persistent_context_async)
             ctx = await launch_persistent_context_async(**launch_kwargs)
             self._context = ctx
             self._browser = None
@@ -435,20 +449,7 @@ class BrowserSession:
                 human_preset=config.human_preset,
                 human_config=config.human_config,
             )
-            if config.backend is not None:
-                if _cloakbrowser_supports_backend():
-                    launch_kwargs["backend"] = config.backend
-                else:
-                    warnings.warn(
-                        "SessionConfig.backend=%r is set but the installed "
-                        "cloakbrowser >=0.4.0 dropped the `backend` parameter "
-                        "(along with the patchright extra). Ignoring, using "
-                        "stock Playwright. Remove `backend=` from your "
-                        "SessionConfig to silence this warning."
-                        % config.backend,
-                        DeprecationWarning,
-                        stacklevel=2,
-                    )
+            _apply_backend_kwarg(launch_kwargs, config.backend, launch_async)
             browser = await launch_async(**launch_kwargs)
             self._browser = browser
             self._context = None
